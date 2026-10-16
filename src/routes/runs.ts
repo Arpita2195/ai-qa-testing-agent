@@ -74,7 +74,7 @@ const runRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const testCasesResult = await pool.query<TestCaseRow>(
-        "SELECT id, steps FROM test_cases WHERE project_id = $1 ORDER BY created_at ASC",
+        "SELECT id, steps FROM test_cases WHERE project_id = $1 AND review_status = 'approved' ORDER BY created_at ASC",
         [project.id],
       );
       const results: TestResultRow[] = [];

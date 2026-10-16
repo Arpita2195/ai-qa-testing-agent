@@ -13,6 +13,14 @@ const projectParamsSchema = z.object({
   projectId: z.string().uuid(),
 });
 
+const reviewParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+const reviewBodySchema = z.object({
+  review_status: z.enum(["approved", "rejected"]),
+});
+
 const testCaseRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Params: { projectId: string } }>(
     "/projects/:projectId/test-cases",
@@ -73,6 +81,30 @@ const testCaseRoutes: FastifyPluginAsync = async (fastify) => {
       return result.rows;
     },
   );
+
+  fastify.patch<{ Params: { id: string } }>("/test-cases/:id/review", async (request, reply) => {
+    const params = reviewParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "Invalid test case id: expected a UUID" });
+    }
+
+    const body = reviewBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({
+        error: `Invalid request body: ${body.error.issues.map((issue) => issue.message).join(", ")}`,
+      });
+    }
+
+    const result = await pool.query(
+      "UPDATE test_cases SET review_status = $1 WHERE id = $2 RETURNING *",
+      [body.data.review_status, params.data.id],
+    );
+    if (result.rowCount === 0) {
+      return reply.code(404).send({ error: "Test case not found" });
+    }
+
+    return result.rows[0];
+  });
 };
 
 export default testCaseRoutes;

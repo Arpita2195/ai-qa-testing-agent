@@ -1,5 +1,7 @@
 import Fastify from "fastify";
 import { env } from "./config/env";
+import bugReportRoutes from "./routes/bugReports";
+import generateRoutes from "./routes/generate";
 import healthRoutes from "./routes/health";
 import projectRoutes from "./routes/projects";
 import runRoutes from "./routes/runs";
@@ -8,6 +10,8 @@ import testCaseRoutes from "./routes/testCases";
 const app = Fastify({ logger: true });
 
 app.register(healthRoutes);
+app.register(bugReportRoutes);
+app.register(generateRoutes);
 app.register(projectRoutes);
 app.register(testCaseRoutes);
 app.register(runRoutes);

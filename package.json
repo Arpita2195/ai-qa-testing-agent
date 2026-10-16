@@ -11,13 +11,15 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "migrate": "tsx src/utils/migrate.ts",
-    "smoke": "tsx src/utils/smoke.ts"
+    "smoke": "tsx src/utils/smoke.ts",
+    "smoke:analyze": "tsx src/utils/analyzeSmoke.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google/genai": "^2.30.0",
     "dotenv": "^18.0.8",
     "fastify": "^5.12.7",
     "pg": "^8.23.1",
