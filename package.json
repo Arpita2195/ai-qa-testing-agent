@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "migrate": "tsx src/utils/migrate.ts"
+    "migrate": "tsx src/utils/migrate.ts",
+    "smoke": "tsx src/utils/smoke.ts"
   },
   "keywords": [],
   "author": "",
