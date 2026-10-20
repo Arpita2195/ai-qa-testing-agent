@@ -1,0 +1,54 @@
+.topbar { display:flex; align-items:center; justify-content:space-between; padding:16px max(24px, calc((100vw - 1100px)/2)); border-bottom:1px solid #dbe2ea; background:#fff; }
+.brand { font-weight:800; font-size:1.1rem; color:#17324d; text-decoration:none; }
+.topbar nav { display:flex; gap:18px; }
+.topbar nav a { color:#526174; text-decoration:none; }
+.topbar nav a.active { color:#116b68; font-weight:700; }
+main { max-width:1100px; margin:32px auto; padding:0 24px 60px; }
+h1 { color:#17324d; font-size:2rem; margin:10px 0 18px; }
+h2 { color:#17324d; font-size:1.25rem; }
+.muted { color:#69788a; }
+.back-link { display:inline-block; color:#286b75; text-decoration:none; margin:4px 0 10px; }
+.inline-form { display:flex; flex-wrap:wrap; gap:10px; margin:20px 0; }
+input, select { border:1px solid #cad4df; border-radius:6px; padding:10px 12px; min-width:180px; font:inherit; color:#213044; background:white; }
+textarea { border:1px solid #cad4df; border-radius:6px; padding:10px 12px; width:100%; box-sizing:border-box; resize:vertical; font:inherit; color:#213044; background:white; }
+.stack-form { display:flex; flex-direction:column; gap:10px; padding:16px; border:1px solid #dbe2ea; border-radius:8px; background:#fff; }
+.stack-form h3 { margin:0; color:#17324d; }
+button { border:0; border-radius:6px; padding:10px 14px; background:#176e70; color:white; font:inherit; cursor:pointer; }
+button:disabled { opacity:.55; cursor:wait; }
+button.secondary { background:#e8edf2; color:#34465a; }
+.cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:14px; margin-top:20px; }
+.card, .row-card { background:#fff; border:1px solid #dbe2ea; border-radius:8px; padding:16px; box-shadow:0 2px 8px #16314b0b; }
+.card { display:flex; flex-direction:column; gap:6px; color:#17324d; text-decoration:none; }
+.card span { color:#69788a; font-size:.9rem; }
+.notice { padding:14px; color:#526174; background:#f2f6f8; border-radius:6px; }
+.error { color:#a63232; }
+.tabs { display:flex; gap:6px; border-bottom:1px solid #dbe2ea; margin:24px 0; flex-wrap:wrap; }
+.tabs button { background:transparent; color:#536174; border-radius:6px 6px 0 0; }
+.tabs button.active { color:#116b68; background:#e8f3f2; }
+.tab-content { display:flex; flex-direction:column; gap:12px; }
+.section-heading, .row-card { display:flex; justify-content:space-between; align-items:center; gap:18px; }
+.row-card { margin:10px 0; }
+.row-card p { margin:5px 0; color:#5c6b7c; }
+.row-card a { color:#176e70; }
+.link-row { color:#213044; text-decoration:none; }
+.actions { display:flex; gap:8px; }
+.badge { display:inline-block; padding:3px 9px; border-radius:20px; background:#e8edf2; color:#45576c; text-transform:capitalize; font-size:.8rem; }
+.badge.approved,.badge.passed,.badge.confirmed { background:#e0f3e8; color:#1c6b42; }
+.badge.pending,.badge.suspected { background:#fff3d8; color:#80621b; }
+.badge.rejected,.badge.failed,.badge.dismissed { background:#fde8e7; color:#a13232; }
+.trend { width:100%; max-width:650px; height:170px; overflow:visible; margin:10px 0 24px; }
+.trend line { stroke:#b7c5d2; stroke-width:1; }
+.trend path { fill:none; stroke:#16827c; stroke-width:3; }
+.trend circle { fill:#16827c; }
+.visual-card { align-items:flex-start; flex-direction:column; }
+.visual-images { display:flex; align-items:flex-start; gap:14px; width:100%; overflow-x:auto; }
+.visual-images > div { display:flex; flex:0 0 auto; flex-direction:column; gap:8px; max-width:32%; }
+.visual-preview { display:block; max-width:100%; max-height:320px; object-fit:contain; border:1px solid #dbe2ea; background:#f6f8fa; }
+.evidence-details { margin-top:12px; }
+.evidence-details ul { margin-top:4px; }
+.test-app-box { background:#fff; border:1px solid #c9d8e5; border-radius:8px; padding:20px; margin-bottom:24px; box-shadow:0 4px 12px rgba(22,49,75,0.06); }
+.test-app-box h2 { margin-top:0; margin-bottom:12px; }
+.checkbox-label { display:flex; align-items:center; gap:8px; font-size:.95rem; color:#334e68; cursor:pointer; }
+.access-options { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:14px; }
+@media(max-width:700px) { .access-options { grid-template-columns:1fr; } }
+@media(max-width:650px) { .topbar { padding:14px 18px; } main { margin:20px auto; padding:0 16px 40px; } .row-card { align-items:flex-start; flex-direction:column; } .inline-form { flex-direction:column; } input { width:auto; } }

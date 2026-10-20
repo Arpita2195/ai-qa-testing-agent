@@ -1,12 +1,14 @@
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
+import { redactSecrets } from "../services/runner";
 
 const createTestCaseSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
   steps: z.array(z.string()).min(1),
   expected_result: z.string().optional(),
+  review_status: z.enum(["pending", "approved", "rejected"]).optional(),
 });
 
 const projectParamsSchema = z.object({
@@ -18,7 +20,7 @@ const reviewParamsSchema = z.object({
 });
 
 const reviewBodySchema = z.object({
-  review_status: z.enum(["approved", "rejected"]),
+  review_status: z.enum(["pending", "approved", "rejected"]),
 });
 
 const testCaseRoutes: FastifyPluginAsync = async (fastify) => {
@@ -47,20 +49,29 @@ const testCaseRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
       }
 
+      const reviewStatus = body.data.review_status ?? "approved";
       const result = await pool.query(
-        `INSERT INTO test_cases (id, project_id, title, description, steps, expected_result)
-         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+        `INSERT INTO test_cases (id, project_id, title, description, steps, expected_result, review_status)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
          RETURNING *`,
         [
           params.data.projectId,
-          body.data.title,
-          body.data.description ?? null,
-          JSON.stringify(body.data.steps),
-          body.data.expected_result ?? null,
+          redactSecrets(body.data.title),
+          body.data.description ? redactSecrets(body.data.description) : null,
+          JSON.stringify(body.data.steps.map((step) => redactSecrets(step))),
+          body.data.expected_result ? redactSecrets(body.data.expected_result) : null,
+          reviewStatus,
         ],
       );
 
-      return reply.code(201).send(result.rows[0]);
+      const row = result.rows[0];
+      return reply.code(201).send({
+        ...row,
+        title: redactSecrets(row.title),
+        description: row.description ? redactSecrets(row.description) : null,
+        steps: row.steps.map((step: string) => redactSecrets(step)),
+        expected_result: row.expected_result ? redactSecrets(row.expected_result) : null,
+      });
     },
   );
 
@@ -78,7 +89,13 @@ const testCaseRoutes: FastifyPluginAsync = async (fastify) => {
         [params.data.projectId],
       );
 
-      return result.rows;
+      return result.rows.map((row) => ({
+        ...row,
+        title: redactSecrets(row.title),
+        description: row.description ? redactSecrets(row.description) : null,
+        steps: row.steps.map((step: string) => redactSecrets(step)),
+        expected_result: row.expected_result ? redactSecrets(row.expected_result) : null,
+      }));
     },
   );
 
@@ -103,7 +120,14 @@ const testCaseRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Test case not found" });
     }
 
-    return result.rows[0];
+    const row = result.rows[0];
+    return {
+      ...row,
+      title: redactSecrets(row.title),
+      description: row.description ? redactSecrets(row.description) : null,
+      steps: row.steps.map((step: string) => redactSecrets(step)),
+      expected_result: row.expected_result ? redactSecrets(row.expected_result) : null,
+    };
   });
 };
 

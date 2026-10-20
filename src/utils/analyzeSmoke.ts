@@ -1,5 +1,7 @@
 export {};
 
+import { env } from "../config/env";
+
 const baseUrl = "http://localhost:3000";
 
 interface Project {
@@ -25,7 +27,10 @@ interface AnalyzeRunResponse {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, init);
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: { "x-api-key": env.PLATFORM_API_KEY, ...init?.headers },
+  });
   const body: unknown = await response.json();
   if (!response.ok) {
     throw new Error(`${init?.method ?? "GET"} ${path} failed (${response.status}): ${JSON.stringify(body)}`);

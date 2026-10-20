@@ -35,21 +35,46 @@ async function callGemini(prompt: string): Promise<string> {
   return response.text;
 }
 
+function sanitizeCredentials(value: unknown): unknown {
+  if (typeof value === "string") {
+    let sanitized = value;
+    for (const [secret, placeholder] of [
+      [env.STOCKFLOW_TEST_EMAIL, "{{STOCKFLOW_TEST_EMAIL}}"],
+      [env.STOCKFLOW_TEST_PASSWORD, "{{STOCKFLOW_TEST_PASSWORD}}"],
+    ] as const) {
+      if (secret) {
+        for (const candidate of [secret, encodeURIComponent(secret)]) {
+          sanitized = sanitized.split(candidate).join(placeholder);
+        }
+      }
+    }
+    return sanitized;
+  }
+  if (Array.isArray(value)) return value.map(sanitizeCredentials);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, sanitizeCredentials(child)]),
+    );
+  }
+  return value;
+}
+
 export async function analyzeFailure(
   input: FailureAnalysisInput,
 ): Promise<z.infer<typeof failureAnalysisSchema>> {
+  const sanitizedInput = sanitizeCredentials(input);
   const prompt = `Analyze this test failure and return JSON only with exactly these fields: "title", "description", "severity" ("low", "medium", "high", or "critical"), "classification" ("product_bug", "test_issue", "environment_issue", or "unknown"), "probable_cause", and "reproduction_steps" (array of strings).
 
 The test runner has already determined that this test failed. Do not decide or change its pass/fail status. Base your explanation only on the given data and do not invent evidence. An expected text being absent from the page is not, by itself, proof of a product bug; classify it as a test issue when the test expectation itself is unsupported by the supplied page data. Use classification "unknown" when unsure.
 
 Failure data:
-${JSON.stringify(input)}`;
+${JSON.stringify(sanitizedInput)}`;
 
   const responseText = await callGemini(prompt);
   let parsed: unknown;
 
   try {
-    parsed = JSON.parse(responseText);
+    parsed = sanitizeCredentials(JSON.parse(responseText));
   } catch {
     throw new Error("Gemini returned invalid JSON for failure analysis");
   }
