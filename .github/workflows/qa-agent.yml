@@ -1,0 +1,129 @@
+name: AI QA Testing Agent CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      block_release:
+        description: "Block build on regressions"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  qa-evaluation:
+    name: Run Automated Tests & AI QA Diagnostics
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: qa_agent_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/qa_agent_db
+      PLATFORM_API_KEY: ci-platform-api-key-test-environment
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      AI_MODEL: gemini-2.5-flash
+      STOCKFLOW_BASE_URL: https://stockflow-vert-two.vercel.app
+      STOCKFLOW_TEST_EMAIL: ${{ secrets.STOCKFLOW_TEST_EMAIL }}
+      STOCKFLOW_TEST_PASSWORD: ${{ secrets.STOCKFLOW_TEST_PASSWORD }}
+      BLOCK_ON_REGRESSION: ${{ github.event.inputs.block_release || 'false' }}
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js Runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install Platform Dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium with System Dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Execute Database Migrations
+        run: npm run migrate
+
+      - name: Run Platform Vitest Test Suites
+        run: npm test
+
+      - name: Execute AI QA Testing Agent CI Runner
+        id: run_ci
+        run: |
+          npx tsx src/utils/ciRunner.ts \
+            --commit-sha="${{ github.sha }}" \
+            --branch="${{ github.head_ref || github.ref_name }}" \
+            --pr-number="${{ github.event.pull_request.number }}" \
+            --output-file="artifacts/ci-report.md"
+
+      - name: Upload Test Evidence and Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-test-artifacts
+          path: |
+            artifacts/
+            playwright-report/
+          retention-days: 14
+
+      - name: Publish Summary Comment to Pull Request
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = 'artifacts/ci-report.md';
+            if (!fs.existsSync(path)) return;
+
+            const report = fs.readFileSync(path, 'utf8');
+            const marker = '<!-- ai-qa-testing-agent-ci-report -->';
+            const body = `${marker}\n${report}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existingComment = comments.find(c => c.body && c.body.includes(marker));
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }

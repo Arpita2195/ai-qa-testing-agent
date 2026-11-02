@@ -16,6 +16,9 @@ import runEvidenceRoutes from "./routes/runEvidence";
 import suiteRoutes from "./routes/suites";
 import testCaseRoutes from "./routes/testCases";
 import visualRoutes from "./routes/visual";
+import regressionRoutes from "./routes/regression";
+import orchestratorRoutes from "./routes/orchestrator";
+import webhookRoutes from "./routes/webhooks";
 
 const app = Fastify({ logger: true });
 
@@ -37,6 +40,9 @@ app.register(runRoutes);
 app.register(runEvidenceRoutes);
 app.register(suiteRoutes);
 app.register(visualRoutes);
+app.register(regressionRoutes);
+app.register(orchestratorRoutes);
+app.register(webhookRoutes);
 
 app.get<{ Params: { filename: string } }>("/artifacts/:filename", async (request, reply) => {
   const { filename } = request.params;

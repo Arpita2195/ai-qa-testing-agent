@@ -106,6 +106,60 @@ interface EvidenceSummary {
   screenshotPath?: string | null;
 }
 
+interface FlakyTestItem {
+  id: string;
+  type: "web" | "api";
+  title: string;
+  module?: string;
+  total_runs: number;
+  passed_runs: number;
+  failed_runs: number;
+  flakiness_score: number;
+  last_status: string;
+  last_run_at: string;
+  last_error?: string | null;
+}
+
+interface FlakyResponse {
+  project_id: string;
+  flaky_tests_count: number;
+  flaky_tests: FlakyTestItem[];
+}
+
+interface ComparisonResponse {
+  summary: {
+    base_run_id: string;
+    target_run_id: string;
+    base_commit_sha?: string | null;
+    target_commit_sha?: string | null;
+    base_branch?: string | null;
+    target_branch?: string | null;
+    environment?: string;
+    total_tests: number;
+    passed_count: number;
+    failed_count: number;
+    new_failures_count: number;
+    recurring_failures_count: number;
+    fixed_tests_count: number;
+    stable_passes_count: number;
+    added_tests_count: number;
+    removed_tests_count: number;
+    duration_delta_ms: number;
+    regression_detected: boolean;
+  };
+  items: Array<{
+    id: string;
+    type: "web" | "api";
+    title: string;
+    base_status: string | null;
+    target_status: string | null;
+    change_type: "new_failure" | "recurring_failure" | "fixed" | "stable_pass" | "added" | "removed";
+    duration_ms?: number | null;
+    duration_delta_ms?: number | null;
+    error_message?: string | null;
+  }>;
+}
+
 function useResource<T>(path: string) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1389,8 +1443,13 @@ function SuiteDetailPage() {
 function RunsTab({ projectId }: { projectId: string }) {
   const { data: runs, loading, error } = useResource<Run[]>(`/projects/${projectId}/runs`);
   const { data: trends } = useResource<Run[]>(`/projects/${projectId}/trends`);
+  const { data: flakyData } = useResource<FlakyResponse>(`/projects/${projectId}/flaky-tests`);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState("");
+  const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
+  const [comparison, setComparison] = useState<ComparisonResponse | null>(null);
+  const [comparing, setComparing] = useState(false);
+  const [comparisonError, setComparisonError] = useState("");
   const navigate = useNavigate();
 
   async function runApproved() {
@@ -1409,6 +1468,43 @@ function RunsTab({ projectId }: { projectId: string }) {
     }
   }
 
+  async function compareLatest() {
+    setComparing(true);
+    setComparisonError("");
+    try {
+      const res = await api<ComparisonResponse>(`/projects/${projectId}/runs/latest-comparison`);
+      setComparison(res);
+    } catch (reason) {
+      setComparisonError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setComparing(false);
+    }
+  }
+
+  async function compareSelected() {
+    if (selectedRuns.length !== 2) return;
+    setComparing(true);
+    setComparisonError("");
+    try {
+      const res = await api<ComparisonResponse>(
+        `/projects/${projectId}/runs/compare?baseRunId=${selectedRuns[1]}&targetRunId=${selectedRuns[0]}`,
+      );
+      setComparison(res);
+    } catch (reason) {
+      setComparisonError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setComparing(false);
+    }
+  }
+
+  function toggleRunSelect(runId: string) {
+    setSelectedRuns((prev) => {
+      if (prev.includes(runId)) return prev.filter((id) => id !== runId);
+      if (prev.length >= 2) return [runId, prev[0]];
+      return [...prev, runId];
+    });
+  }
+
   const points = trends ?? [];
   const width = 600;
   const height = 160;
@@ -1417,31 +1513,258 @@ function RunsTab({ projectId }: { projectId: string }) {
     const y = height - ((run.pass_rate ?? 0) / 100) * height;
     return `${index === 0 ? "M" : "L"} ${x} ${y}`;
   }).join(" ");
-  return <div className="tab-content">
-    <div className="section-heading">
-      <h2>Pass rate trend</h2>
-      <button onClick={runApproved} disabled={running}>
-        {running ? "Running tests…" : "Run approved web tests"}
-      </button>
+
+  return (
+    <div className="tab-content">
+      {/* Flaky Tests Alert */}
+      {(flakyData?.flaky_tests_count ?? 0) > 0 && (
+        <div className="card" style={{ borderLeft: "4px solid #f59e0b", padding: "16px", background: "#fffbeb" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong>⚠️ Flaky Tests Detected ({flakyData?.flaky_tests_count})</strong>
+            <span style={{ fontSize: "0.85rem", color: "#92400e" }}>
+              Tests with inconsistent pass/fail results across recent runs
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px" }}>
+            {flakyData?.flaky_tests.map((ft) => (
+              <div key={ft.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", padding: "8px 12px", borderRadius: "6px", border: "1px solid #fef3c7" }}>
+                <div>
+                  <strong>{ft.title}</strong>
+                  <span style={{ marginLeft: "8px", color: "#6b7280", fontSize: "0.85rem" }}>
+                    ({ft.passed_runs} passed / {ft.failed_runs} failed across {ft.total_runs} runs)
+                  </span>
+                  {ft.last_error && <p className="error" style={{ fontSize: "0.8rem", margin: "2px 0 0" }}>Last error: {ft.last_error}</p>}
+                </div>
+                <span className="badge" style={{ background: "#fef3c7", color: "#92400e", fontWeight: "bold" }}>
+                  Flakiness: {Math.round(ft.flakiness_score * 100)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Regression Comparison Section */}
+      <div className="section-heading">
+        <h2>Pass rate trend & Build History</h2>
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="secondary"
+            onClick={compareLatest}
+            disabled={comparing || (runs?.length ?? 0) < 2}
+          >
+            {comparing ? "Comparing…" : "Compare latest builds"}
+          </button>
+          {selectedRuns.length === 2 && (
+            <button
+              type="button"
+              className="secondary"
+              onClick={compareSelected}
+              disabled={comparing}
+            >
+              Compare 2 selected runs
+            </button>
+          )}
+          <button onClick={runApproved} disabled={running}>
+            {running ? "Running tests…" : "Run approved web tests"}
+          </button>
+        </div>
+      </div>
+
+      {message && <p className="notice">{message}</p>}
+      {comparisonError && <p className="notice error">{comparisonError}</p>}
+
+      {/* Comparison Results Card */}
+      {comparison && (
+        <div className="card" style={{ padding: "18px", border: "1px solid #cbd5e1", background: "#f8fafc" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <h3 style={{ margin: "0 0 4px" }}>Build Regression Analysis</h3>
+              <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+                Target run {comparison.summary.target_run_id.slice(0, 8)} vs Base run {comparison.summary.base_run_id.slice(0, 8)}
+                {comparison.summary.target_commit_sha ? ` (Commit ${comparison.summary.target_commit_sha.slice(0, 7)})` : ""}
+              </p>
+            </div>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <span
+                className="badge"
+                style={{
+                  background: comparison.summary.regression_detected ? "#fee2e2" : "#dcfce7",
+                  color: comparison.summary.regression_detected ? "#991b1b" : "#166534",
+                  fontWeight: "bold",
+                  fontSize: "0.9rem",
+                  padding: "6px 12px",
+                }}
+              >
+                {comparison.summary.regression_detected
+                  ? `🚨 Regression Detected (${comparison.summary.new_failures_count} new)`
+                  : "✅ Clean Build (No regression)"}
+              </span>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setComparison(null)}
+                style={{ padding: "4px 8px", fontSize: "0.85rem" }}
+              >
+                ✕ Close
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "10px", margin: "14px 0" }}>
+            <div className="card" style={{ padding: "10px", textAlign: "center" }}>
+              <span style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#dc2626" }}>
+                {comparison.summary.new_failures_count}
+              </span>
+              <span style={{ fontSize: "0.8rem", color: "#64748b" }}>New Failures</span>
+            </div>
+            <div className="card" style={{ padding: "10px", textAlign: "center" }}>
+              <span style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#ea580c" }}>
+                {comparison.summary.recurring_failures_count}
+              </span>
+              <span style={{ fontSize: "0.8rem", color: "#64748b" }}>Recurring Failures</span>
+            </div>
+            <div className="card" style={{ padding: "10px", textAlign: "center" }}>
+              <span style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#16a34a" }}>
+                {comparison.summary.fixed_tests_count}
+              </span>
+              <span style={{ fontSize: "0.8rem", color: "#64748b" }}>Fixed Tests</span>
+            </div>
+            <div className="card" style={{ padding: "10px", textAlign: "center" }}>
+              <span style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#2563eb" }}>
+                {comparison.summary.stable_passes_count}
+              </span>
+              <span style={{ fontSize: "0.8rem", color: "#64748b" }}>Stable Passes</span>
+            </div>
+            <div className="card" style={{ padding: "10px", textAlign: "center" }}>
+              <span style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#475569" }}>
+                {comparison.summary.duration_delta_ms > 0 ? `+${comparison.summary.duration_delta_ms}` : comparison.summary.duration_delta_ms} ms
+              </span>
+              <span style={{ fontSize: "0.8rem", color: "#64748b" }}>Duration Δ</span>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "300px", overflowY: "auto" }}>
+            {comparison.items.map((item) => (
+              <div
+                key={item.id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  background: "#fff",
+                  padding: "8px 12px",
+                  borderRadius: "6px",
+                  border: item.change_type === "new_failure" ? "1px solid #fca5a5" : "1px solid #e2e8f0",
+                }}
+              >
+                <div>
+                  <strong>{item.title}</strong>
+                  <span style={{ marginLeft: "8px", fontSize: "0.8rem", color: "#64748b" }}>
+                    ({item.type})
+                  </span>
+                  {item.error_message && (
+                    <p className="error" style={{ fontSize: "0.8rem", margin: "2px 0 0" }}>
+                      {item.error_message}
+                    </p>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                  <span style={{ fontSize: "0.8rem", color: "#64748b" }}>
+                    {item.base_status ?? "none"} → {item.target_status ?? "none"}
+                  </span>
+                  <span
+                    className="badge"
+                    style={{
+                      background:
+                        item.change_type === "new_failure"
+                          ? "#fee2e2"
+                          : item.change_type === "recurring_failure"
+                            ? "#ffedd5"
+                            : item.change_type === "fixed"
+                              ? "#dcfce7"
+                              : "#f1f5f9",
+                      color:
+                        item.change_type === "new_failure"
+                          ? "#991b1b"
+                          : item.change_type === "recurring_failure"
+                            ? "#9a3412"
+                            : item.change_type === "fixed"
+                              ? "#166534"
+                              : "#475569",
+                      fontWeight: "bold",
+                    }}
+                  >
+                    {item.change_type.replace("_", " ")}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Trend Graph */}
+      {points.length > 0 ? (
+        <svg className="trend" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Pass rate by run">
+          <line x1="0" y1={height} x2={width} y2={height} />
+          <path d={path} />
+          {points.map((run, index) => {
+            const x = points.length < 2 ? width / 2 : (index / (points.length - 1)) * width;
+            const y = height - ((run.pass_rate ?? 0) / 100) * height;
+            return (
+              <circle key={run.id} cx={x} cy={y} r="4">
+                <title>{run.pass_rate}%</title>
+              </circle>
+            );
+          })}
+        </svg>
+      ) : (
+        <p className="muted">No run trend data yet.</p>
+      )}
+
+      {/* Runs List with checkboxes for comparison */}
+      <State loading={loading} error={error}>
+        {(runs ?? []).map((run) => (
+          <div
+            className="row-card"
+            key={run.id}
+            style={{
+              borderLeft: selectedRuns.includes(run.id) ? "4px solid #16827c" : undefined,
+              background: selectedRuns.includes(run.id) ? "#f0fdfa" : undefined,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <input
+                type="checkbox"
+                aria-label={`Select run ${run.id} for comparison`}
+                checked={selectedRuns.includes(run.id)}
+                onChange={() => toggleRunSelect(run.id)}
+              />
+              <Link className="link-row" to={`/runs/${run.id}`}>
+                <div>
+                  <strong>{run.run_type}</strong>
+                  <span style={{ marginLeft: "8px", color: "#64748b", fontSize: "0.85rem" }}>
+                    {new Date(run.created_at).toLocaleString()}
+                  </span>
+                </div>
+                <div style={{ fontSize: "0.85rem", color: "#64748b", marginTop: "2px" }}>
+                  {run.passed_count ?? 0} passed · {run.failed_count ?? 0} failed
+                </div>
+              </Link>
+            </div>
+            <div className="actions" style={{ alignItems: "center" }}>
+              <span className={`badge ${run.status}`}>{run.status}</span>
+              <Link to={`/runs/${run.id}`} className="button secondary" style={{ fontSize: "0.85rem", padding: "6px 10px", textDecoration: "none" }}>
+                Details →
+              </Link>
+            </div>
+          </div>
+        ))}
+      </State>
     </div>
-    {message && <p className="notice">{message}</p>}
-    {points.length > 0 ? <svg className="trend" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Pass rate by run">
-      <line x1="0" y1={height} x2={width} y2={height} />
-      <path d={path} />
-      {points.map((run, index) => {
-        const x = points.length < 2 ? width / 2 : (index / (points.length - 1)) * width;
-        const y = height - ((run.pass_rate ?? 0) / 100) * height;
-        return <circle key={run.id} cx={x} cy={y} r="4"><title>{run.pass_rate}%</title></circle>;
-      })}
-    </svg> : <p className="muted">No run trend data yet.</p>}
-    <State loading={loading} error={error}>
-      {(runs ?? []).map((run) => <Link className="row-card link-row" key={run.id} to={`/runs/${run.id}`}>
-        <span>{run.run_type} · {new Date(run.created_at).toLocaleString()}</span>
-        <span className={`badge ${run.status}`}>{run.status}</span>
-        <span>{run.passed_count ?? 0} passed · {run.failed_count ?? 0} failed</span>
-      </Link>)}
-    </State>
-  </div>;
+  );
 }
 
 function RunDetailPage() {

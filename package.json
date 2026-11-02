@@ -18,7 +18,9 @@
     "run:stockflow": "tsx src/utils/stockflowRun.ts",
     "smoke:visual": "tsx src/utils/visualSmoke.ts",
     "check:demo1:env": "tsx src/utils/checkDemo1Env.ts",
-    "demo:1": "tsx src/utils/demo1.ts"
+    "demo:1": "tsx src/utils/demo1.ts",
+    "test:ci": "tsx src/utils/ciRunner.ts",
+    "demo:bugs": "tsx src/utils/demoBugs.ts"
   },
   "keywords": [],
   "author": "",

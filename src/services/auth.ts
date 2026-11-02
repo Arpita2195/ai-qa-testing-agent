@@ -10,6 +10,9 @@ export function createApiKeyHook(apiKey: string): onRequestHookHandler {
     if (request.method === "GET" && request.routeOptions.url === "/health") {
       return;
     }
+    if (request.url.startsWith("/webhooks/")) {
+      return;
+    }
 
     const supplied = request.headers["x-api-key"];
     const actual = Buffer.from(typeof supplied === "string" ? supplied : "");

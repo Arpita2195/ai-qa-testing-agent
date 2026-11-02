@@ -17,6 +17,11 @@ import { writeRunReport } from "../services/runReport";
 const runBodySchema = z.object({
   include_non_approved: z.boolean().default(false),
   test_case_id: z.string().uuid().optional(),
+  commit_sha: z.string().min(1).max(100).optional(),
+  build_id: z.string().min(1).max(100).optional(),
+  branch: z.string().min(1).max(100).optional(),
+  environment: z.string().min(1).max(50).default("test"),
+  trigger_source: z.enum(["manual", "ci", "schedule", "orchestrator"]).default("manual"),
 });
 
 const projectParamsSchema = z.object({
@@ -118,10 +123,18 @@ const runRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const runResult = await pool.query<TestRunRow>(
-        `INSERT INTO test_runs (id, project_id, status, started_at, run_type)
-         VALUES (gen_random_uuid(), $1, 'running', now(), 'web')
+        `INSERT INTO test_runs
+           (id, project_id, status, started_at, run_type, commit_sha, build_id, branch, environment, trigger_source)
+         VALUES (gen_random_uuid(), $1, 'running', now(), 'web', $2, $3, $4, $5, $6)
          RETURNING *`,
-        [project.id],
+        [
+          project.id,
+          body.data.commit_sha ?? null,
+          body.data.build_id ?? null,
+          body.data.branch ?? null,
+          body.data.environment,
+          body.data.trigger_source,
+        ],
       );
       const run = runResult.rows[0];
 
