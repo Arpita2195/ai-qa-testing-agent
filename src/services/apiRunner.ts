@@ -1,7 +1,11 @@
-import { assertTargetUrlAllowed } from "./urlGuard";
+import { classifyRunStatus } from "./runner";
+import { assertTargetUrlAllowed, safeFetch, SecurityError, type SafeFetchResponse } from "./urlGuard";
 
 export type ApiMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export type ExpectedFieldType = "string" | "number" | "boolean" | "object" | "array";
+export type ApiTestStatus = "passed" | "failed" | "skipped" | "inconclusive";
+
+export { classifyRunStatus, classifyRunStatus as classifyApiRunStatus };
 
 export interface ApiEndpoint {
   method: ApiMethod;
@@ -11,14 +15,45 @@ export interface ApiEndpoint {
   expected_status: number;
   expected_fields: Record<string, ExpectedFieldType>;
   max_response_ms: number | null;
+  enabled?: boolean;
+  skip?: boolean;
+  skip_reason?: string;
+  timeout_ms?: number | null;
 }
 
 export interface ApiTestResult {
-  status: "passed" | "failed";
+  status: ApiTestStatus;
   actualStatus: number | null;
   responseMs: number;
   errorMessage: string | null;
   responseSnippet: string;
+}
+
+export function isNetworkOrInfrastructureError(error: unknown): boolean {
+  if (!error) return false;
+  if (error instanceof SecurityError) return true;
+  const err = error as { name?: string; code?: string; message?: string; cause?: unknown };
+  if (err.name === "AbortError" || err.name === "TimeoutError" || err.name === "SecurityError") return true;
+  if (
+    err.code &&
+    /ENOTFOUND|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|ETIMEDOUT|UND_ERR_/.test(
+      err.code,
+    )
+  ) {
+    return true;
+  }
+  const message = String(err.message || "").toLowerCase();
+  if (
+    /abort|timeout|timed out|enotfound|econnrefused|econnreset|socket hang up|failed to fetch|fetch failed|network error|getaddrinfo|ehostunreach|enetunreach|security guard|prohibited|blocked by security/.test(
+      message,
+    )
+  ) {
+    return true;
+  }
+  if (err.cause) {
+    return isNetworkOrInfrastructureError(err.cause);
+  }
+  return false;
 }
 
 function redactSecretValues(text: string, headers: Record<string, string>): string {
@@ -50,25 +85,54 @@ export async function runApiTest(
   baseUrl: string,
   endpoint: ApiEndpoint,
 ): Promise<ApiTestResult> {
+  // Check if test endpoint is explicitly disabled or skipped
+  if (endpoint.skip || endpoint.enabled === false) {
+    return {
+      status: "skipped",
+      actualStatus: null,
+      responseMs: 0,
+      errorMessage: endpoint.skip_reason ?? "API endpoint testing skipped",
+      responseSnippet: "",
+    };
+  }
+
   const startedAt = Date.now();
+  const timeoutLimit = endpoint.timeout_ms && endpoint.timeout_ms > 0 ? endpoint.timeout_ms : 30_000;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
-  let response: Response | undefined;
+  const timeout = setTimeout(() => controller.abort(), timeoutLimit);
+  let response: SafeFetchResponse | Response | undefined;
   let responseText = "";
 
   try {
     const url = new URL(endpoint.path, baseUrl);
-    await assertTargetUrlAllowed(url.toString());
-    const init: RequestInit = {
-      method: endpoint.method,
-      headers: endpoint.headers,
-      signal: controller.signal,
-    };
-    if (endpoint.body !== null && endpoint.body !== undefined) {
-      init.body = JSON.stringify(endpoint.body);
+    try {
+      await assertTargetUrlAllowed(url.toString());
+    } catch (guardErr) {
+      const responseMs = Date.now() - startedAt;
+      const message = guardErr instanceof Error ? guardErr.message : String(guardErr);
+      return {
+        status: "inconclusive",
+        actualStatus: null,
+        responseMs,
+        errorMessage: `Target URL blocked by security policy: ${message}`,
+        responseSnippet: "",
+      };
     }
 
-    response = await fetch(url, init);
+    const bodyPayload =
+      endpoint.body !== null && endpoint.body !== undefined
+        ? typeof endpoint.body === "string"
+          ? endpoint.body
+          : JSON.stringify(endpoint.body)
+        : null;
+
+    response = await safeFetch(url.toString(), {
+      method: endpoint.method,
+      headers: endpoint.headers,
+      body: bodyPayload,
+      timeoutMs: timeoutLimit,
+      signal: controller.signal,
+    });
     responseText = await response.text();
     const responseMs = Date.now() - startedAt;
     const responseSnippet = redactSecretValues(responseText, endpoint.headers).slice(0, 500);
@@ -93,7 +157,7 @@ export async function runApiTest(
       };
     }
 
-    const expectedFields = Object.entries(endpoint.expected_fields);
+    const expectedFields = Object.entries(endpoint.expected_fields || {});
     if (expectedFields.length > 0) {
       let responseBody: unknown;
       try {
@@ -149,12 +213,30 @@ export async function runApiTest(
     };
   } catch (error) {
     const responseMs = Date.now() - startedAt;
-    const message =
-      error instanceof Error && error.name === "AbortError"
-        ? "Request timeout assertion failed: expected response within 30000ms, actual timed out"
-        : `Request assertion failed: ${error instanceof Error ? error.message : String(error)}`;
+    const isTimeout =
+      (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) ||
+      controller.signal.aborted;
+    const isSecurity =
+      error instanceof SecurityError ||
+      (error instanceof Error &&
+        (error.message.includes("security guard") ||
+          error.message.includes("prohibited") ||
+          error.message.includes("SecurityError")));
+    const isInconclusive = isTimeout || isSecurity || isNetworkOrInfrastructureError(error);
+
+    let message: string;
+    if (isSecurity) {
+      message = `Target URL blocked by security policy: ${error instanceof Error ? error.message : String(error)}`;
+    } else if (isTimeout) {
+      message = `Request timeout: expected response within ${timeoutLimit}ms, actual timed out`;
+    } else if (isInconclusive) {
+      message = `Network/Infrastructure error: ${error instanceof Error ? error.message : String(error)}`;
+    } else {
+      message = `Request assertion failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
     return {
-      status: "failed",
+      status: isInconclusive ? "inconclusive" : "failed",
       actualStatus: response?.status ?? null,
       responseMs,
       errorMessage: redactSecretValues(message, endpoint.headers),
@@ -164,3 +246,4 @@ export async function runApiTest(
     clearTimeout(timeout);
   }
 }
+
