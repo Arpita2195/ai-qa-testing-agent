@@ -137,6 +137,72 @@ describe("regressionService", () => {
       vi.mocked(pool.query).mockResolvedValueOnce({ rowCount: 0, rows: [] } as any);
       await expect(compareRuns("r1", "r2")).rejects.toThrow("Base run r1 not found");
     });
+
+    it("throws clear error when target run is not found", async () => {
+      vi.mocked(pool.query).mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{ id: "r1", project_id: "p1" }],
+      } as any);
+      await expect(compareRuns("r1", "r2")).rejects.toThrow("Target run r2 not found");
+    });
+
+    it("rejects comparing a run with itself", async () => {
+      await expect(compareRuns("r1", "r1")).rejects.toThrow("must be distinct");
+    });
+
+    it("throws when expected project does not exist", async () => {
+      vi.mocked(pool.query).mockImplementation(async (sql: string) => {
+        if (sql.includes("FROM projects WHERE id = $1")) {
+          return { rowCount: 0, rows: [] } as any;
+        }
+        return { rowCount: 0, rows: [] } as any;
+      });
+
+      await expect(compareRuns("r1", "r2", "nonexistent-p")).rejects.toThrow(
+        "Project nonexistent-p not found",
+      );
+    });
+
+    it("rejects comparisons involving runs from different projects", async () => {
+      vi.mocked(pool.query).mockImplementation(async (sql: string) => {
+        if (sql.includes("FROM test_runs WHERE id IN")) {
+          return {
+            rowCount: 2,
+            rows: [
+              { id: "r1", project_id: "project-alpha" },
+              { id: "r2", project_id: "project-beta" },
+            ],
+          } as any;
+        }
+        return { rowCount: 0, rows: [] } as any;
+      });
+
+      await expect(compareRuns("r1", "r2")).rejects.toThrow(
+        "Cross-project comparison is prohibited",
+      );
+    });
+
+    it("rejects comparison when run does not belong to expectedProjectId", async () => {
+      vi.mocked(pool.query).mockImplementation(async (sql: string) => {
+        if (sql.includes("FROM projects WHERE id = $1")) {
+          return { rowCount: 1, rows: [{ id: "project-target" }] } as any;
+        }
+        if (sql.includes("FROM test_runs WHERE id IN")) {
+          return {
+            rowCount: 2,
+            rows: [
+              { id: "r1", project_id: "project-other" },
+              { id: "r2", project_id: "project-other" },
+            ],
+          } as any;
+        }
+        return { rowCount: 0, rows: [] } as any;
+      });
+
+      await expect(compareRuns("r1", "r2", "project-target")).rejects.toThrow(
+        "Run does not belong to project project-target",
+      );
+    });
   });
 
   describe("detectFlakyTests", () => {

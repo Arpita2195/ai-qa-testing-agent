@@ -1,17 +1,43 @@
 import Fastify from "fastify";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { pool } from "../config/db";
 import { createApiKeyHook } from "../services/auth";
 import regressionRoutes from "../routes/regression";
 import * as regressionService from "../services/regressionService";
 
-vi.mock("../services/regressionService");
+vi.mock("../config/db", () => ({
+  pool: {
+    query: vi.fn(),
+  },
+}));
+
+vi.mock("../services/regressionService", async () => {
+  const actual = await vi.importActual<typeof regressionService>("../services/regressionService");
+  return {
+    ...actual,
+    compareRuns: vi.fn(),
+    detectFlakyTests: vi.fn(),
+    recommendTestsForChanges: vi.fn(),
+  };
+});
 
 describe("regression routes", () => {
   let app: ReturnType<typeof Fastify> | undefined;
   const testApiKey = "test-platform-api-key";
+  const validProjectId = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
+  const validBaseRunId = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22";
+  const validTargetRunId = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33";
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default pool.query mock: project exists
+    vi.mocked(pool.query).mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM projects WHERE id = $1")) {
+        return { rowCount: 1, rows: [{ id: validProjectId, name: "StockFlow" }] } as any;
+      }
+      return { rowCount: 0, rows: [] } as any;
+    });
+
     app = Fastify();
     app.addHook("onRequest", createApiKeyHook(testApiKey));
     app.register(regressionRoutes);
@@ -22,10 +48,6 @@ describe("regression routes", () => {
     app = undefined;
   });
 
-  const validProjectId = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
-  const validBaseRunId = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22";
-  const validTargetRunId = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33";
-
   it("requires platform API key", async () => {
     const res = await app!.inject({
       method: "GET",
@@ -34,7 +56,7 @@ describe("regression routes", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("compares two runs with valid UUID query params", async () => {
+  it("compares two runs with valid UUID query params and enforces project scope", async () => {
     vi.mocked(regressionService.compareRuns).mockResolvedValueOnce({
       summary: {
         base_run_id: validBaseRunId,
@@ -64,7 +86,11 @@ describe("regression routes", () => {
     const body = res.json();
     expect(body.summary.regression_detected).toBe(true);
     expect(body.summary.new_failures_count).toBe(1);
-    expect(regressionService.compareRuns).toHaveBeenCalledWith(validBaseRunId, validTargetRunId);
+    expect(regressionService.compareRuns).toHaveBeenCalledWith(
+      validBaseRunId,
+      validTargetRunId,
+      validProjectId,
+    );
   });
 
   it("returns 400 for invalid UUIDs in compare query params", async () => {
@@ -74,10 +100,84 @@ describe("regression routes", () => {
       headers: { "x-api-key": testApiKey },
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json()).toHaveProperty("error");
+    expect(res.json().error).toContain("baseRunId and targetRunId must be UUIDs");
   });
 
-  it("returns flaky tests list", async () => {
+  it("returns 400 when comparing a run with itself", async () => {
+    const res = await app!.inject({
+      method: "GET",
+      url: `/projects/${validProjectId}/runs/compare?baseRunId=${validBaseRunId}&targetRunId=${validBaseRunId}`,
+      headers: { "x-api-key": testApiKey },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain("must be distinct");
+  });
+
+  it("returns 404 when the project does not exist in the database", async () => {
+    vi.mocked(pool.query).mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM projects WHERE id = $1")) {
+        return { rowCount: 0, rows: [] } as any;
+      }
+      return { rowCount: 0, rows: [] } as any;
+    });
+
+    const res = await app!.inject({
+      method: "GET",
+      url: `/projects/${validProjectId}/runs/compare?baseRunId=${validBaseRunId}&targetRunId=${validTargetRunId}`,
+      headers: { "x-api-key": testApiKey },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toContain("Project");
+    expect(res.json().error).toContain("not found");
+  });
+
+  it("returns 404 when a run is not found", async () => {
+    vi.mocked(regressionService.compareRuns).mockRejectedValueOnce(
+      new regressionService.NonexistentRunError(`Base run ${validBaseRunId} not found`),
+    );
+
+    const res = await app!.inject({
+      method: "GET",
+      url: `/projects/${validProjectId}/runs/compare?baseRunId=${validBaseRunId}&targetRunId=${validTargetRunId}`,
+      headers: { "x-api-key": testApiKey },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toContain("not found");
+  });
+
+  it("returns 403 when cross-project comparison is attempted", async () => {
+    vi.mocked(regressionService.compareRuns).mockRejectedValueOnce(
+      new regressionService.CrossProjectComparisonError(
+        "Cross-project comparison is prohibited: runs belong to different projects",
+      ),
+    );
+
+    const res = await app!.inject({
+      method: "GET",
+      url: `/projects/${validProjectId}/runs/compare?baseRunId=${validBaseRunId}&targetRunId=${validTargetRunId}`,
+      headers: { "x-api-key": testApiKey },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toContain("Cross-project comparison is prohibited");
+  });
+
+  it("returns 403 when a run does not belong to the requested project", async () => {
+    vi.mocked(regressionService.compareRuns).mockRejectedValueOnce(
+      new regressionService.CrossProjectComparisonError(
+        `Run does not belong to project ${validProjectId}`,
+      ),
+    );
+
+    const res = await app!.inject({
+      method: "GET",
+      url: `/projects/${validProjectId}/runs/compare?baseRunId=${validBaseRunId}&targetRunId=${validTargetRunId}`,
+      headers: { "x-api-key": testApiKey },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toContain("does not belong to project");
+  });
+
+  it("returns flaky tests list for valid project", async () => {
     vi.mocked(regressionService.detectFlakyTests).mockResolvedValueOnce([
       {
         id: "tc-1",
@@ -106,7 +206,7 @@ describe("regression routes", () => {
     expect(regressionService.detectFlakyTests).toHaveBeenCalledWith(validProjectId, 20);
   });
 
-  it("recommends tests based on changed files", async () => {
+  it("recommends tests based on changed files for valid project", async () => {
     vi.mocked(regressionService.recommendTestsForChanges).mockResolvedValueOnce({
       changed_files: ["src/auth/login.ts"],
       matched_keywords: ["auth", "login"],
@@ -137,3 +237,4 @@ describe("regression routes", () => {
     expect(body.recommended_test_cases[0].id).toBe("tc-auth");
   });
 });
+

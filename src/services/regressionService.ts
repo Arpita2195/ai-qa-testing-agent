@@ -38,10 +38,49 @@ interface DbApiResultRow {
   error_message: string | null;
 }
 
+export class NonexistentRunError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonexistentRunError";
+  }
+}
+
+export class CrossProjectComparisonError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CrossProjectComparisonError";
+  }
+}
+
+export class InvalidRunComparisonError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRunComparisonError";
+  }
+}
+
 export async function compareRuns(
   baseRunId: string,
   targetRunId: string,
+  expectedProjectId?: string,
 ): Promise<RunComparisonResult> {
+  if (baseRunId === targetRunId) {
+    throw new InvalidRunComparisonError(
+      `Cannot compare run ${baseRunId} with itself: base and target run IDs must be distinct`,
+    );
+  }
+
+  // If expectedProjectId is specified, verify project exists
+  if (expectedProjectId) {
+    const projectCheck = await pool.query<{ id: string }>(
+      "SELECT id FROM projects WHERE id = $1",
+      [expectedProjectId],
+    );
+    if (projectCheck.rows.length === 0) {
+      throw new NonexistentRunError(`Project ${expectedProjectId} not found`);
+    }
+  }
+
   const runsQuery = await pool.query<DbRunRow>(
     "SELECT * FROM test_runs WHERE id IN ($1, $2)",
     [baseRunId, targetRunId],
@@ -51,10 +90,29 @@ export async function compareRuns(
   const targetRun = runsQuery.rows.find((r) => r.id === targetRunId);
 
   if (!baseRun) {
-    throw new Error(`Base run ${baseRunId} not found`);
+    throw new NonexistentRunError(`Base run ${baseRunId} not found`);
   }
   if (!targetRun) {
-    throw new Error(`Target run ${targetRunId} not found`);
+    throw new NonexistentRunError(`Target run ${targetRunId} not found`);
+  }
+
+  // Cross-project check 1: Base run and target run must belong to the exact same project
+  if (baseRun.project_id !== targetRun.project_id) {
+    throw new CrossProjectComparisonError(
+      `Cross-project comparison is prohibited: base run belongs to project ${baseRun.project_id} while target run belongs to project ${targetRun.project_id}`,
+    );
+  }
+
+  // Cross-project check 2: If an expectedProjectId is specified, both runs must match it
+  if (expectedProjectId && baseRun.project_id !== expectedProjectId) {
+    throw new CrossProjectComparisonError(
+      `Run does not belong to project ${expectedProjectId}: base run belongs to project ${baseRun.project_id}`,
+    );
+  }
+  if (expectedProjectId && targetRun.project_id !== expectedProjectId) {
+    throw new CrossProjectComparisonError(
+      `Run does not belong to project ${expectedProjectId}: target run belongs to project ${targetRun.project_id}`,
+    );
   }
 
   // Fetch Web results for both runs

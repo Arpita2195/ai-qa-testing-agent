@@ -5,6 +5,9 @@ import {
   compareRuns,
   detectFlakyTests,
   recommendTestsForChanges,
+  CrossProjectComparisonError,
+  NonexistentRunError,
+  InvalidRunComparisonError,
 } from "../services/regressionService";
 
 const projectParamsSchema = z.object({
@@ -38,13 +41,42 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
+    if (query.data.baseRunId === query.data.targetRunId) {
+      return reply.code(400).send({
+        error: "Cannot compare a run with itself: baseRunId and targetRunId must be distinct",
+      });
+    }
+
+    // Verify project exists
+    const projectCheck = await pool.query<{ id: string }>(
+      "SELECT id FROM projects WHERE id = $1",
+      [params.data.projectId],
+    );
+    if (projectCheck.rows.length === 0) {
+      return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
+    }
+
     try {
-      const comparison = await compareRuns(query.data.baseRunId, query.data.targetRunId);
+      const comparison = await compareRuns(
+        query.data.baseRunId,
+        query.data.targetRunId,
+        params.data.projectId,
+      );
       return reply.send(comparison);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("not found")) {
+      if (
+        err instanceof CrossProjectComparisonError ||
+        message.includes("Cross-project") ||
+        message.includes("does not belong to project")
+      ) {
+        return reply.code(403).send({ error: message });
+      }
+      if (err instanceof NonexistentRunError || message.includes("not found")) {
         return reply.code(404).send({ error: message });
+      }
+      if (err instanceof InvalidRunComparisonError || message.includes("Cannot compare")) {
+        return reply.code(400).send({ error: message });
       }
       return reply.code(500).send({ error: message });
     }
@@ -57,6 +89,15 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       const params = projectParamsSchema.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+
+      // Verify project exists
+      const projectCheck = await pool.query<{ id: string }>(
+        "SELECT id FROM projects WHERE id = $1",
+        [params.data.projectId],
+      );
+      if (projectCheck.rows.length === 0) {
+        return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
       }
 
       const recentRuns = await pool.query<{ id: string }>(
@@ -77,10 +118,20 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       const baseRunId = recentRuns.rows[1].id;
 
       try {
-        const comparison = await compareRuns(baseRunId, targetRunId);
+        const comparison = await compareRuns(baseRunId, targetRunId, params.data.projectId);
         return reply.send(comparison);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (
+          err instanceof CrossProjectComparisonError ||
+          message.includes("Cross-project") ||
+          message.includes("does not belong to project")
+        ) {
+          return reply.code(403).send({ error: message });
+        }
+        if (err instanceof NonexistentRunError || message.includes("not found")) {
+          return reply.code(404).send({ error: message });
+        }
         return reply.code(500).send({ error: message });
       }
     },
@@ -96,6 +147,15 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
     }
 
+    // Verify project exists
+    const projectCheck = await pool.query<{ id: string }>(
+      "SELECT id FROM projects WHERE id = $1",
+      [params.data.projectId],
+    );
+    if (projectCheck.rows.length === 0) {
+      return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
+    }
+
     const limit = request.query.limit ? parseInt(request.query.limit, 10) : 30;
     try {
       const flaky = await detectFlakyTests(params.data.projectId, isNaN(limit) ? 30 : limit);
@@ -106,6 +166,9 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof NonexistentRunError || message.includes("not found")) {
+        return reply.code(404).send({ error: message });
+      }
       return reply.code(500).send({ error: message });
     }
   });
@@ -117,6 +180,15 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       const params = projectParamsSchema.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+
+      // Verify project exists
+      const projectCheck = await pool.query<{ id: string }>(
+        "SELECT id FROM projects WHERE id = $1",
+        [params.data.projectId],
+      );
+      if (projectCheck.rows.length === 0) {
+        return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
       }
 
       const body = recommendBodySchema.safeParse(request.body);
@@ -134,10 +206,14 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.send(result);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof NonexistentRunError || message.includes("not found")) {
+          return reply.code(404).send({ error: message });
+        }
         return reply.code(500).send({ error: message });
       }
     },
   );
 };
+
 
 export default regressionRoutes;

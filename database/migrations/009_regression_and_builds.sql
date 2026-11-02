@@ -10,6 +10,9 @@ ALTER TABLE test_runs
 CREATE INDEX IF NOT EXISTS test_runs_commit_sha_idx ON test_runs(commit_sha);
 CREATE INDEX IF NOT EXISTS test_runs_branch_idx ON test_runs(branch);
 CREATE INDEX IF NOT EXISTS test_runs_environment_idx ON test_runs(environment);
+CREATE INDEX IF NOT EXISTS test_runs_project_id_idx ON test_runs(project_id);
+CREATE INDEX IF NOT EXISTS test_results_run_id_idx ON test_results(run_id);
+CREATE INDEX IF NOT EXISTS api_test_results_run_id_idx ON api_test_results(run_id);
 
 ALTER TABLE test_cases
   ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1,

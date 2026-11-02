@@ -236,7 +236,7 @@ export async function runCiPipeline(options: CiRunnerOptions): Promise<{
 
   if (prevRunQuery.rows.length > 0) {
     try {
-      comparisonResult = await compareRuns(prevRunQuery.rows[0].id, runId);
+      comparisonResult = await compareRuns(prevRunQuery.rows[0].id, runId, project.id);
     } catch (err) {
       console.warn("Could not compute run comparison:", err);
     }

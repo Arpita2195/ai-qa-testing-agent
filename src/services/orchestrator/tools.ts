@@ -223,11 +223,14 @@ export const runApiTestsOutputSchema = z.object({
   total: z.number(),
   passed: z.number(),
   failed: z.number(),
+  inconclusive: z.number().default(0),
+  skipped: z.number().default(0),
   failed_endpoints: z.array(
     z.object({
       id: z.string(),
       name: z.string(),
       error: z.string().nullable(),
+      status: z.string().optional(),
     }),
   ),
 });
@@ -292,24 +295,26 @@ async function handleRunApiTests(
     });
   }
 
-  const allPassed = results.every((r) => r.status === "passed");
-  const runStatus = allPassed ? "passed" : "failed";
+  const runStatus = classifyRunStatus(results.map((r) => r.status));
   await pool.query(
     "UPDATE test_runs SET status = $1, finished_at = now() WHERE id = $2",
     [runStatus, runId],
   );
 
-  const failedEndpoints = results.filter((r) => r.status === "failed");
+  const failedEndpoints = results.filter((r) => r.status === "failed" || r.status === "inconclusive");
   return {
     run_id: runId,
     status: runStatus,
     total: results.length,
     passed: results.filter((r) => r.status === "passed").length,
-    failed: failedEndpoints.length,
+    failed: results.filter((r) => r.status === "failed").length,
+    inconclusive: results.filter((r) => r.status === "inconclusive").length,
+    skipped: results.filter((r) => r.status === "skipped").length,
     failed_endpoints: failedEndpoints.map((f) => ({
       id: f.id,
       name: f.name,
       error: f.error_message,
+      status: f.status,
     })),
   };
 }
@@ -356,7 +361,7 @@ async function handleCompareRegression(
     baseRunId = prevQuery.rows[0].id;
   }
 
-  const comp = await compareRuns(baseRunId, params.target_run_id);
+  const comp = await compareRuns(baseRunId, params.target_run_id, context.projectId);
   const newFailures = comp.items.filter((i) => i.change_type === "new_failure");
 
   return {
