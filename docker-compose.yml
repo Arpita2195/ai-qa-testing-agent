@@ -1,0 +1,189 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai_qa_postgres
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 128M
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_secure_password_123}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_qa_agent}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks:
+      - qa_network
+    # Security: No public PostgreSQL port exposed by default
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ai_qa_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # Task 13: Local S3-Compatible Artifact Storage (MinIO)
+  # Internal only — not exposed publicly
+  minio:
+    image: minio/minio:latest
+    container_name: ai_qa_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 128M
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-miniopassword123}
+    volumes:
+      - minio_data:/data
+    networks:
+      - qa_network
+    # Security: Ports remain internal to qa_network.
+    # To view console locally on host during dev, bind strictly to loopback:
+    # ports:
+    #   - "127.0.0.1:9000:9000"
+    #   - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_qa_backend
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+        reservations:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_password_123}@postgres:5432/${POSTGRES_DB:-ai_qa_agent}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      AI_MODEL: ${AI_MODEL:-gemini-2.5-flash}
+      PLATFORM_API_KEY: ${PLATFORM_API_KEY}
+      COOKIE_SECRET: ${COOKIE_SECRET:-replace_with_a_secure_cookie_signing_secret_at_least_32_characters}
+      STOCKFLOW_BASE_URL: ${STOCKFLOW_BASE_URL:-https://stockflow-vert-two.vercel.app}
+      STOCKFLOW_TEST_EMAIL: ${STOCKFLOW_TEST_EMAIL:-}
+      STOCKFLOW_TEST_PASSWORD: ${STOCKFLOW_TEST_PASSWORD:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174}
+      RUN_MIGRATIONS: "true"
+      # Task 12 & 13 & 14 Environment Config
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_BUCKET: ${S3_BUCKET:-ai-qa-artifacts}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-miniopassword123}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      USE_REDIS_QUEUE: ${USE_REDIS_QUEUE:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    shm_size: "1gb"
+    volumes:
+      - test_artifacts:/app/artifacts
+    tmpfs:
+      - /tmp:rw,nosuid,size=256m
+    networks:
+      - qa_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3000}
+    container_name: ai_qa_dashboard
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          memory: 32M
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${DASHBOARD_PORT:-5173}:8080"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=16m
+      - /var/cache/nginx:rw,noexec,nosuid,size=64m
+    networks:
+      - qa_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  postgres_data:
+    name: ai_qa_postgres_data
+  minio_data:
+    name: ai_qa_minio_data
+  test_artifacts:
+    name: ai_qa_test_artifacts
+
+networks:
+  qa_network:
+    name: ai_qa_network
+    driver: bridge

@@ -9,6 +9,7 @@ import {
   NonexistentRunError,
   InvalidRunComparisonError,
 } from "../services/regressionService";
+import { assertProjectAccess } from "../services/authService";
 
 const projectParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -56,6 +57,10 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
     }
 
+    if (request.user) {
+      await assertProjectAccess(request.user, params.data.projectId, "viewer");
+    }
+
     try {
       const comparison = await compareRuns(
         query.data.baseRunId,
@@ -98,6 +103,10 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       );
       if (projectCheck.rows.length === 0) {
         return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
+      }
+
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "viewer");
       }
 
       const recentRuns = await pool.query<{ id: string }>(
@@ -156,6 +165,10 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
     }
 
+    if (request.user) {
+      await assertProjectAccess(request.user, params.data.projectId, "viewer");
+    }
+
     const limit = request.query.limit ? parseInt(request.query.limit, 10) : 30;
     try {
       const flaky = await detectFlakyTests(params.data.projectId, isNaN(limit) ? 30 : limit);
@@ -189,6 +202,10 @@ const regressionRoutes: FastifyPluginAsync = async (fastify) => {
       );
       if (projectCheck.rows.length === 0) {
         return reply.code(404).send({ error: `Project ${params.data.projectId} not found` });
+      }
+
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "viewer");
       }
 
       const body = recommendBodySchema.safeParse(request.body);

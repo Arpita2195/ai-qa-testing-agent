@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { redactSecrets, scrubEvidence, type StockFlowCredentials, type WebEvidence, type WebResultStatus } from "./runner";
+import { describeTestStep } from "../utils/testStepDescription";
 
 export interface RunReportCase {
   id: string;
@@ -81,7 +82,7 @@ function escapeHtml(value: string): string {
 function caseHtml(test: RunReportCase, imageData: string | null): string {
   const steps = test.steps.map((step, index) => {
     const failed = test.evidence.failureStepIndex === index;
-    return `<li${failed ? ' class="failed-step"' : ""}>${failed ? "<strong>FAILED STEP: </strong>" : ""}${escapeHtml(step)}</li>`;
+    return `<li${failed ? ' class="failed-step"' : ""}>${failed ? "<strong>FAILED STEP: </strong>" : ""}${escapeHtml(describeTestStep(step))}</li>`;
   }).join("");
   const browserErrors = test.evidence.browserErrors.map((error) => `<li>${escapeHtml(error)}</li>`).join("");
   const failedRequests = test.evidence.failedRequests.map((request) =>

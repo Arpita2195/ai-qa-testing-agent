@@ -7,6 +7,7 @@ import {
 } from "../services/generator";
 import { readSite } from "../services/pageReader";
 import { checkGenerateRateLimit } from "../services/rateLimiter";
+import { assertProjectAccess } from "../services/authService";
 
 const paramsSchema = z.object({
   projectId: z.string().uuid(),
@@ -29,6 +30,10 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
       const params = paramsSchema.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
       }
 
       const body = bodySchema.safeParse(request.body ?? {});

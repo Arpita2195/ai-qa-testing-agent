@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "../config/db";
 import { analyzeFailure } from "../services/failureAnalyzer";
 import { readPage } from "../services/pageReader";
+import { assertProjectAccess } from "../services/authService";
 
 const idParamsSchema = z.object({
   id: z.string().uuid(),
@@ -23,6 +24,7 @@ const statusBodySchema = z.object({
 interface FailureRow {
   result_id: string;
   test_case_id: string;
+  project_id: string;
   result_status: string;
   error_message: string | null;
   screenshot_path: string | null;
@@ -44,7 +46,7 @@ interface BugReportRow {
 
 async function loadFailure(resultId: string): Promise<FailureRow | undefined> {
   const result = await pool.query<FailureRow>(
-    `SELECT tr.id AS result_id, tr.test_case_id, tr.status AS result_status, tr.error_message,
+    `SELECT tr.id AS result_id, tr.test_case_id, p.id AS project_id, tr.status AS result_status, tr.error_message,
             tr.screenshot_path, tc.title, tc.steps, tc.expected_result, p.base_url
      FROM test_results tr
      JOIN test_cases tc ON tc.id = tr.test_case_id
@@ -121,6 +123,9 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
       if (failure.result_status !== "failed") {
         return reply.code(400).send({ error: "Only failed test results can be analyzed" });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, failure.project_id, "qa_engineer");
+      }
 
       const existing = await pool.query<BugReportRow>(
         "SELECT * FROM bug_reports WHERE result_id = $1",
@@ -143,13 +148,19 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: "Invalid runId: expected a UUID" });
       }
 
-      const run = await pool.query("SELECT 1 FROM test_runs WHERE id = $1", [params.data.runId]);
+      const run = await pool.query<{ project_id: string }>(
+        "SELECT project_id FROM test_runs WHERE id = $1",
+        [params.data.runId],
+      );
       if (run.rowCount === 0) {
         return reply.code(404).send({ error: "Test run not found" });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, run.rows[0].project_id, "qa_engineer");
+      }
 
       const failures = await pool.query<FailureRow>(
-        `SELECT tr.id AS result_id, tr.test_case_id, tr.status AS result_status, tr.error_message,
+        `SELECT tr.id AS result_id, tr.test_case_id, p.id AS project_id, tr.status AS result_status, tr.error_message,
                 tr.screenshot_path, tc.title, tc.steps, tc.expected_result, p.base_url
          FROM test_results tr
          JOIN test_cases tc ON tc.id = tr.test_case_id
@@ -179,13 +190,23 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  fastify.get("/bug-reports", async () => {
-    const reports = await pool.query<BugReportRow>(
-      `SELECT br.*, tc.title AS test_case_title
-       FROM bug_reports br
-       LEFT JOIN test_cases tc ON tc.id = br.test_case_id
-       ORDER BY br.created_at DESC`,
-    );
+  fastify.get("/bug-reports", async (request) => {
+    let query: string;
+    let queryParams: any[] = [];
+    if (request.user && request.user.role !== "admin" && !request.user.isServiceAccount) {
+      query = `SELECT br.*, tc.title AS test_case_title
+               FROM bug_reports br
+               JOIN test_cases tc ON tc.id = br.test_case_id
+               JOIN project_members pm ON pm.project_id = tc.project_id AND pm.user_id = $1
+               ORDER BY br.created_at DESC`;
+      queryParams = [request.user.id];
+    } else {
+      query = `SELECT br.*, tc.title AS test_case_title
+               FROM bug_reports br
+               LEFT JOIN test_cases tc ON tc.id = br.test_case_id
+               ORDER BY br.created_at DESC`;
+    }
+    const reports = await pool.query<BugReportRow>(query, queryParams);
     return reports.rows;
   });
 
@@ -195,8 +216,8 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Invalid bug report id: expected a UUID" });
     }
 
-    const report = await pool.query<BugReportRow>(
-      `SELECT br.*, tc.title AS test_case_title
+    const report = await pool.query<BugReportRow & { project_id: string }>(
+      `SELECT br.*, tc.title AS test_case_title, tc.project_id
        FROM bug_reports br
        LEFT JOIN test_cases tc ON tc.id = br.test_case_id
        WHERE br.id = $1`,
@@ -204,6 +225,9 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
     );
     if (!report.rows[0]) {
       return reply.code(404).send({ error: "Bug report not found" });
+    }
+    if (request.user && report.rows[0].project_id) {
+      await assertProjectAccess(request.user, report.rows[0].project_id, "viewer");
     }
     return report.rows[0];
   });
@@ -221,6 +245,19 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({
           error: `Invalid request body: ${body.error.issues.map((issue) => issue.message).join(", ")}`,
         });
+      }
+
+      const reportCheck = await pool.query<{ project_id: string }>(
+        `SELECT tc.project_id FROM bug_reports br
+         JOIN test_cases tc ON tc.id = br.test_case_id
+         WHERE br.id = $1`,
+        [params.data.id],
+      );
+      if (reportCheck.rowCount === 0) {
+        return reply.code(404).send({ error: "Bug report not found" });
+      }
+      if (request.user) {
+        await assertProjectAccess(request.user, reportCheck.rows[0].project_id, "qa_engineer");
       }
 
       const result = await pool.query<BugReportRow>(

@@ -1,7 +1,13 @@
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
-import { runApiTest, type ApiEndpoint, type ApiTestResult } from "../services/apiRunner";
+import {
+  runApiTest,
+  classifyRunStatus,
+  type ApiEndpoint,
+  type ApiTestResult,
+} from "../services/apiRunner";
+import { assertProjectAccess } from "../services/authService";
 
 const projectParamsSchema = z.object({ projectId: z.string().uuid() });
 const idParamsSchema = z.object({ id: z.string().uuid() });
@@ -40,6 +46,11 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
       }
+
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
+      }
+
       const projectResult = await pool.query<ProjectRow>(
         "SELECT id, base_url FROM projects WHERE id = $1",
         [params.data.projectId],
@@ -90,7 +101,7 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
         results.push({ ...result.rows[0], name: endpoint.name });
       }
 
-      const status = results.every((result) => result.status === "passed") ? "passed" : "failed";
+      const status = classifyRunStatus(results.map((result) => result.status));
       const updated = await pool.query<RunRow>(
         "UPDATE test_runs SET status = $1, finished_at = now() WHERE id = $2 RETURNING *",
         [status, run.id],
@@ -115,6 +126,11 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
     if (!run) {
       return reply.code(404).send({ error: "API run not found" });
     }
+
+    if (request.user) {
+      await assertProjectAccess(request.user, run.project_id, "viewer");
+    }
+
     const results = await pool.query(
       `SELECT r.*, e.name AS endpoint_name
        FROM api_test_results r JOIN api_endpoints e ON e.id = r.endpoint_id

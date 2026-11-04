@@ -349,6 +349,8 @@ export function isInternalHostname(hostname: string, allowPrivate = false): bool
   if (
     host.endsWith(".local") ||
     host.endsWith(".internal") ||
+    host.endsWith(".docker.internal") ||
+    host.endsWith(".docker") ||
     host.endsWith(".corp") ||
     host.endsWith(".lan") ||
     host.endsWith(".home") ||
@@ -361,6 +363,21 @@ export function isInternalHostname(hostname: string, allowPrivate = false): bool
     return true;
   }
   if (isCloudMetadataTarget(host)) return true;
+
+  // Internal container service hostnames are always blocked from target scanning
+  const internalContainerNames = [
+    "postgres",
+    "ai_qa_postgres",
+    "backend",
+    "ai_qa_backend",
+    "dashboard",
+    "ai_qa_dashboard",
+    "database",
+    "db",
+  ];
+  if (internalContainerNames.includes(host)) {
+    return true;
+  }
 
   // Single-label hostnames without dot (e.g. "admin", "router", "backend") are internal unless private targets allowed
   if (!host.includes(".") && !allowPrivate) {
@@ -490,7 +507,13 @@ export async function validateTargetUrl(
   try {
     resolvedAddresses = await dns.lookup(hostname, { all: true });
   } catch (error) {
-    if (hostname.endsWith(".test") || hostname.endsWith(".example")) {
+    if (
+      hostname.endsWith(".test") ||
+      hostname.endsWith(".example") ||
+      hostname === "example.com" ||
+      hostname === "example.org" ||
+      hostname === "example.net"
+    ) {
       return { valid: true, normalizedUrl: parsed.toString() };
     }
     return {

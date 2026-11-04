@@ -5,6 +5,14 @@ import { z } from "zod";
 import { pool } from "../config/db";
 import { runApiTest, type ApiEndpoint } from "../services/apiRunner";
 import { classifyRunStatus, redactSecrets, runTestCase, scrubEvidence } from "../services/runner";
+import { assertProjectAccess } from "../services/authService";
+import {
+  executeConcurrentPool,
+  runWebTestWithRetries,
+  runApiTestWithRetries,
+  type ExtendedWebExecutionResult,
+  type ExtendedApiExecutionResult,
+} from "../services/executionManager";
 
 const projectParams = z.object({ projectId: z.string().uuid() });
 const idParams = z.object({ id: z.string().uuid() });
@@ -59,6 +67,9 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "viewer");
+      }
       const result = await pool.query(
         `SELECT r.*,
            COALESCE(web.passed_count, 0) + COALESCE(api.passed_count, 0) AS passed_count,
@@ -88,6 +99,9 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
       const params = projectParams.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "viewer");
       }
       const result = await pool.query(
         `WITH recent AS (
@@ -131,6 +145,9 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
       if (!body.success) {
         return reply.code(400).send({ error: "Invalid suite body: name is required" });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_manager");
+      }
       const exists = await pool.query("SELECT 1 FROM projects WHERE id = $1", [params.data.projectId]);
       if (exists.rowCount === 0) {
         return reply.code(404).send({ error: "Project not found" });
@@ -149,6 +166,9 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
       const params = projectParams.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "viewer");
       }
       const exists = await pool.query("SELECT 1 FROM projects WHERE id = $1", [params.data.projectId]);
       if (exists.rowCount === 0) {
@@ -180,6 +200,10 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
     const suite = suiteResult.rows[0];
     if (!suite) {
       return reply.code(404).send({ error: "Suite not found" });
+    }
+
+    if (request.user) {
+      await assertProjectAccess(request.user, suite.project_id, "qa_manager");
     }
 
     if (body.data.test_case_id) {
@@ -220,6 +244,11 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
     if (!suite) {
       return reply.code(404).send({ error: "Suite not found" });
     }
+
+    if (request.user) {
+      await assertProjectAccess(request.user, suite.project_id, "viewer");
+    }
+
     const members = await pool.query(
       `SELECT sm.*, tc.title AS test_case_title, ae.name AS endpoint_name
        FROM suite_members sm
@@ -231,7 +260,10 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
     return { ...suite, members: members.rows };
   });
 
-  fastify.post<{ Params: { id: string } }>("/suites/:id/run", async (request, reply) => {
+  fastify.post<{
+    Params: { id: string };
+    Body?: { concurrency?: number; retries?: number };
+  }>("/suites/:id/run", async (request, reply) => {
     const params = idParams.safeParse(request.params);
     if (!params.success) {
       return reply.code(400).send({ error: "Invalid suite id: expected a UUID" });
@@ -243,6 +275,11 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
     if (!suite) {
       return reply.code(404).send({ error: "Suite not found" });
     }
+
+    if (request.user) {
+      await assertProjectAccess(request.user, suite.project_id, "qa_engineer");
+    }
+
     const projectResult = await pool.query<{ name: string; base_url: string }>(
       "SELECT name, base_url FROM projects WHERE id = $1",
       [suite.project_id],
@@ -253,10 +290,13 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
+    const concurrency = Math.min(Math.max(request.body?.concurrency ?? 2, 1), 10);
+    const retries = Math.min(Math.max(request.body?.retries ?? 1, 0), 5);
+
     const runResult = await pool.query<RunRow>(
-      `INSERT INTO test_runs (id, project_id, suite_id, run_type, status, started_at)
-       VALUES (gen_random_uuid(), $1, $2, 'suite', 'running', now()) RETURNING *`,
-      [suite.project_id, suite.id],
+      `INSERT INTO test_runs (id, project_id, suite_id, run_type, status, concurrency, retries, started_at)
+       VALUES (gen_random_uuid(), $1, $2, 'suite', 'running', $3, $4, now()) RETURNING *`,
+      [suite.project_id, suite.id, concurrency, retries],
     );
     const run = runResult.rows[0];
     if (!run) {
@@ -276,78 +316,123 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
        ORDER BY sm.ctid`,
       [suite.id],
     );
+
     const results: Array<Record<string, unknown>> = [];
     const reportCases: RunReportCase[] = [];
-    for (const member of members.rows) {
-      if (member.test_case_id && member.steps) {
-        const resultId = randomUUID();
-        const execution = await runTestCase(baseUrl, member.steps, { runId: run.id, resultId }, { projectId: suite.project_id });
-        const saved = await pool.query(
-          `INSERT INTO test_results
-             (id, run_id, test_case_id, status, error_message, duration_ms, screenshot_path, trace_path, evidence)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-          [
-            resultId,
-            run.id,
-            member.test_case_id,
-            execution.status,
-            execution.errorMessage ? redactSecrets(execution.errorMessage) : null,
-            execution.durationMs,
-            execution.screenshotPath,
-            execution.tracePath ?? null,
-            JSON.stringify(scrubEvidence(execution.evidence)),
-          ],
-        );
-        const savedResult = {
-          ...saved.rows[0],
-          test_case_title: redactSecrets(member.test_case_title ?? "Web test case"),
-          steps: member.steps.map((step) => redactSecrets(step)),
-          error_message: saved.rows[0].error_message ? redactSecrets(saved.rows[0].error_message) : null,
-          evidence: scrubEvidence(saved.rows[0].evidence),
-        };
-        results.push(savedResult);
-        reportCases.push({
-          id: resultId,
-          title: redactSecrets(member.test_case_title ?? "Web test case"),
-          steps: member.steps.map((step) => redactSecrets(step)),
-          status: execution.status,
-          duration_ms: execution.durationMs,
-          error_message: execution.errorMessage ? redactSecrets(execution.errorMessage) : null,
-          evidence: scrubEvidence(execution.evidence),
-        });
-      } else if (member.endpoint_id && member.method && member.path) {
-        const execution = await runApiTest(baseUrl, {
-          method: member.method,
-          path: member.path,
-          headers: member.headers ?? {},
-          body: member.body,
-          expected_status: member.expected_status ?? 200,
-          expected_fields: member.expected_fields ?? {},
-          max_response_ms: member.max_response_ms,
-        });
-        const saved = await pool.query(
-          `INSERT INTO api_test_results
-             (run_id, endpoint_id, status, actual_status, response_ms, error_message, response_snippet)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-          [
-            run.id,
-            member.endpoint_id,
-            execution.status,
-            execution.actualStatus,
-            execution.responseMs,
-            execution.errorMessage,
-            execution.responseSnippet,
-          ],
-        );
-        results.push({ ...saved.rows[0], endpoint_name: member.endpoint_name });
-      }
-    }
+    let flakyCount = 0;
+    let inconclusiveCount = 0;
+    let skippedCount = 0;
+
+    await executeConcurrentPool(
+      members.rows,
+      async (member) => {
+        if (member.test_case_id && member.steps) {
+          const resultId = randomUUID();
+          const execution: ExtendedWebExecutionResult = await runWebTestWithRetries(
+            baseUrl,
+            member.steps,
+            { runId: run.id, resultId },
+            { projectId: suite.project_id, retries },
+          );
+
+          if (execution.flaky) flakyCount++;
+          if (execution.status === "inconclusive") inconclusiveCount++;
+          if (execution.status === "skipped") skippedCount++;
+
+          const saved = await pool.query(
+            `INSERT INTO test_results
+               (id, run_id, test_case_id, status, error_message, duration_ms, screenshot_path, trace_path, evidence, retry_count, flaky, attempts)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+            [
+              resultId,
+              run.id,
+              member.test_case_id,
+              execution.status,
+              execution.errorMessage ? redactSecrets(execution.errorMessage) : null,
+              execution.durationMs,
+              execution.screenshotPath,
+              execution.tracePath ?? null,
+              JSON.stringify(scrubEvidence(execution.evidence)),
+              execution.retryCount,
+              execution.flaky,
+              JSON.stringify(execution.attempts),
+            ],
+          );
+          const savedResult = {
+            ...saved.rows[0],
+            test_case_title: redactSecrets(member.test_case_title ?? "Web test case"),
+            steps: member.steps.map((step) => redactSecrets(step)),
+            error_message: saved.rows[0].error_message ? redactSecrets(saved.rows[0].error_message) : null,
+            evidence: scrubEvidence(saved.rows[0].evidence),
+            flaky: execution.flaky,
+            retry_count: execution.retryCount,
+          };
+          results.push(savedResult);
+          reportCases.push({
+            id: resultId,
+            title: redactSecrets(member.test_case_title ?? "Web test case"),
+            steps: member.steps.map((step) => redactSecrets(step)),
+            status: execution.status,
+            duration_ms: execution.durationMs,
+            error_message: execution.errorMessage ? redactSecrets(execution.errorMessage) : null,
+            evidence: scrubEvidence(execution.evidence),
+          });
+        } else if (member.endpoint_id && member.method && member.path) {
+          const execution: ExtendedApiExecutionResult = await runApiTestWithRetries(
+            baseUrl,
+            {
+              method: member.method,
+              path: member.path,
+              headers: member.headers ?? {},
+              body: member.body,
+              expected_status: member.expected_status ?? 200,
+              expected_fields: member.expected_fields ?? {},
+              max_response_ms: member.max_response_ms,
+            },
+            { retries },
+          );
+
+          if (execution.flaky) flakyCount++;
+          if (execution.status === "inconclusive") inconclusiveCount++;
+          if (execution.status === "skipped") skippedCount++;
+
+          const saved = await pool.query(
+            `INSERT INTO api_test_results
+               (run_id, endpoint_id, status, actual_status, response_ms, error_message, response_snippet, retry_count, flaky, attempts, step_results)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+            [
+              run.id,
+              member.endpoint_id,
+              execution.status,
+              execution.actualStatus,
+              execution.responseMs,
+              execution.errorMessage,
+              execution.responseSnippet,
+              execution.retryCount,
+              execution.flaky,
+              JSON.stringify(execution.attempts),
+              JSON.stringify(execution.stepResults ?? []),
+            ],
+          );
+          results.push({
+            ...saved.rows[0],
+            endpoint_name: member.endpoint_name,
+            flaky: execution.flaky,
+            retry_count: execution.retryCount,
+          });
+        }
+      },
+      concurrency,
+    );
 
     const status = classifyRunStatus(results.map((result) => String(result.status)));
     const finishedAt = new Date();
     const updated = await pool.query<RunRow>(
-      "UPDATE test_runs SET status = $1, finished_at = now() WHERE id = $2 RETURNING *",
-      [status, run.id],
+      `UPDATE test_runs
+       SET status = $1, finished_at = now(),
+           flaky_count = $2, inconclusive_count = $3, skipped_count = $4, total_count = $5
+       WHERE id = $6 RETURNING *`,
+      [status, flakyCount, inconclusiveCount, skippedCount, members.rowCount, run.id],
     );
     if (projectName) {
       await writeRunReport({

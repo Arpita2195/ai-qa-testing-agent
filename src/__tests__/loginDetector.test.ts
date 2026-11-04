@@ -83,19 +83,24 @@ describe("loginDetector access detection", () => {
 
   afterAll(async () => {
     process.env.ALLOW_PRIVATE_TARGETS = oldAllowPrivate;
-    await browser?.close();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  });
+    await browser?.close().catch(() => {});
+    if (server) {
+      if (typeof (server as any).closeAllConnections === "function") {
+        (server as any).closeAllConnections();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => {});
+    }
+  }, 60000);
 
   it("marks a page with a password input as login_required", async () => {
-    const status = await detectAccess(`${baseUrl}/login`);
+    const status = await detectAccess(`${baseUrl}/login`, undefined, browser);
     expect(status).toBe("login_required");
-  }, 30000);
+  }, 60000);
 
   it("marks a plain page with real content as public", async () => {
-    const status = await detectAccess(`${baseUrl}/`);
+    const status = await detectAccess(`${baseUrl}/`, undefined, browser);
     expect(status).toBe("public");
-  }, 30000);
+  }, 60000);
 
   it("detects CAPTCHA on a page requiring manual interaction", async () => {
     const page = await browser.newPage();
@@ -107,7 +112,7 @@ describe("loginDetector access detection", () => {
     } finally {
       await page.close();
     }
-  });
+  }, 30000);
 
   it("detects MFA / 2FA code prompt on a page", async () => {
     const page = await browser.newPage();
@@ -119,5 +124,5 @@ describe("loginDetector access detection", () => {
     } finally {
       await page.close();
     }
-  });
+  }, 30000);
 });

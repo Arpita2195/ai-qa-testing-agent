@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import { runVisualCheck, type VisualBaseline, type VisualCheck } from "../services/visualRunner";
+import { assertProjectAccess } from "../services/authService";
 
 const projectParams = z.object({ projectId: z.string().uuid() });
 const idParams = z.object({ id: z.string().uuid() });
@@ -50,6 +51,9 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
           error: `Invalid visual check: ${body.error.issues.map((issue) => issue.message).join(", ")}`,
         });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
+      }
       const project = await pool.query("SELECT 1 FROM projects WHERE id = $1", [
         params.data.projectId,
       ]);
@@ -80,6 +84,9 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "viewer");
+      }
       const project = await pool.query("SELECT 1 FROM projects WHERE id = $1", [
         params.data.projectId,
       ]);
@@ -108,6 +115,9 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
       const params = projectParams.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
       }
       const projectResult = await pool.query<ProjectRow>(
         "SELECT id, base_url FROM projects WHERE id = $1",
@@ -190,6 +200,9 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
     );
     const run = runResult.rows[0];
     if (!run) return reply.code(404).send({ error: "Visual run not found" });
+    if (request.user) {
+      await assertProjectAccess(request.user, run.project_id, "viewer");
+    }
     const results = await pool.query(
       `SELECT vr.*, vc.name AS check_name
        FROM visual_results vr JOIN visual_checks vc ON vc.id = vr.check_id
@@ -210,6 +223,18 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
       if (!body.success) {
         return reply.code(400).send({ error: "decision must be accept_change or confirm_bug" });
       }
+
+      const checkQuery = await pool.query<{ project_id: string }>(
+        "SELECT vc.project_id FROM visual_results vr JOIN visual_checks vc ON vc.id = vr.check_id WHERE vr.id = $1",
+        [params.data.id],
+      );
+      if (checkQuery.rowCount === 0) {
+        return reply.code(404).send({ error: "Visual result not found" });
+      }
+      if (request.user) {
+        await assertProjectAccess(request.user, checkQuery.rows[0].project_id, "qa_manager");
+      }
+
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
@@ -269,12 +294,15 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
       if (!body.success) {
         return reply.code(400).send({ error: "review_status must be approved or rejected" });
       }
-      const result = await pool.query<{ id: string; check_id: string }>(
-        "SELECT id, check_id FROM visual_baselines WHERE id = $1",
+      const result = await pool.query<{ id: string; check_id: string; project_id: string }>(
+        "SELECT vb.id, vb.check_id, vc.project_id FROM visual_baselines vb JOIN visual_checks vc ON vc.id = vb.check_id WHERE vb.id = $1",
         [params.data.id],
       );
       const baseline = result.rows[0];
       if (!baseline) return reply.code(404).send({ error: "Visual baseline not found" });
+      if (request.user) {
+        await assertProjectAccess(request.user, baseline.project_id, "qa_manager");
+      }
       if (body.data.review_status === "approved") {
         await pool.query(
           "UPDATE visual_baselines SET status = 'rejected' WHERE check_id = $1 AND status = 'approved'",

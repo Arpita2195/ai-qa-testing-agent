@@ -1,4 +1,4 @@
-import { chromium } from "@playwright/test";
+import { chromium, type Browser } from "@playwright/test";
 import { pool } from "../config/db";
 import { assertTargetUrlAllowed, attachUrlGuardToPage } from "./urlGuard";
 
@@ -83,10 +83,16 @@ export async function detectInteractiveAuthNeeds(page: { url: () => string; loca
 export async function detectAccess(
   url: string,
   projectId?: string,
+  existingBrowser?: Browser,
 ): Promise<"public" | "login_required"> {
   await assertTargetUrlAllowed(url);
 
-  const browser = await chromium.launch({ headless: true });
+  const browser =
+    existingBrowser ??
+    (await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    }));
   try {
     const page = await browser.newPage();
     page.setDefaultTimeout(30000);
@@ -96,8 +102,8 @@ export async function detectAccess(
 
     // Wait for network to settle or fallback
     try {
-      await page.waitForLoadState("load", { timeout: 10000 });
-      await page.waitForLoadState("networkidle", { timeout: 2000 });
+      await page.waitForLoadState("load", { timeout: 5000 });
+      await page.waitForLoadState("networkidle", { timeout: 1500 });
     } catch {
       // networkidle may timeout on polling pages; domcontentloaded/load is fine
     }
@@ -106,7 +112,7 @@ export async function detectAccess(
     try {
       await page.waitForFunction(
         () => document.body && document.body.innerText.trim().length > 0,
-        { timeout: 15000 },
+        { timeout: 3000 },
       );
     } catch {
       // Proceed with inspection even if page has little text
@@ -180,6 +186,8 @@ export async function detectAccess(
 
     return status;
   } finally {
-    await browser.close().catch(() => {});
+    if (!existingBrowser) {
+      await browser.close().catch(() => {});
+    }
   }
 }

@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import { importOpenApi, skipExistingEndpoints } from "../services/openapiImporter";
+import { assertProjectAccess } from "../services/authService";
 
 const methodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const fieldTypeSchema = z.enum(["string", "number", "boolean", "object", "array"]);
@@ -33,6 +34,9 @@ const apiEndpointRoutes: FastifyPluginAsync = async (fastify) => {
       const params = projectParamsSchema.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
       }
       const project = await pool.query("SELECT 1 FROM projects WHERE id = $1", [
         params.data.projectId,
@@ -97,6 +101,9 @@ const apiEndpointRoutes: FastifyPluginAsync = async (fastify) => {
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
+      }
       const project = await pool.query("SELECT 1 FROM projects WHERE id = $1", [params.data.projectId]);
       if (project.rowCount === 0) {
         return reply.code(404).send({ error: "Project not found" });
@@ -147,6 +154,9 @@ const apiEndpointRoutes: FastifyPluginAsync = async (fastify) => {
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
       }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "viewer");
+      }
       const project = await pool.query("SELECT 1 FROM projects WHERE id = $1", [params.data.projectId]);
       if (project.rowCount === 0) {
         return reply.code(404).send({ error: "Project not found" });
@@ -164,6 +174,17 @@ const apiEndpointRoutes: FastifyPluginAsync = async (fastify) => {
     if (!params.success) {
       return reply.code(400).send({ error: "Invalid endpoint id: expected a UUID" });
     }
+    const endpointCheck = await pool.query<{ project_id: string }>(
+      "SELECT project_id FROM api_endpoints WHERE id = $1",
+      [params.data.id],
+    );
+    if (endpointCheck.rowCount === 0) {
+      return reply.code(404).send({ error: "API endpoint not found" });
+    }
+    if (request.user) {
+      await assertProjectAccess(request.user, endpointCheck.rows[0].project_id, "qa_manager");
+    }
+
     const result = await pool.query("DELETE FROM api_endpoints WHERE id = $1 RETURNING id", [
       params.data.id,
     ]);
@@ -182,6 +203,17 @@ const apiEndpointRoutes: FastifyPluginAsync = async (fastify) => {
     if (!body.success) {
       return reply.code(400).send({ error: "review_status must be approved or rejected" });
     }
+    const endpointCheck = await pool.query<{ project_id: string }>(
+      "SELECT project_id FROM api_endpoints WHERE id = $1",
+      [params.data.id],
+    );
+    if (endpointCheck.rowCount === 0) {
+      return reply.code(404).send({ error: "API endpoint not found" });
+    }
+    if (request.user) {
+      await assertProjectAccess(request.user, endpointCheck.rows[0].project_id, "qa_manager");
+    }
+
     const result = await pool.query(
       "UPDATE api_endpoints SET review_status = $1 WHERE id = $2 RETURNING *",
       [body.data.review_status, params.data.id],

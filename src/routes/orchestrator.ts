@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import { orchestrate } from "../services/orchestrator/orchestrator";
+import { assertProjectAccess } from "../services/authService";
 
 const projectParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -23,6 +24,10 @@ const orchestratorRoutes: FastifyPluginAsync = async (fastify) => {
       const params = projectParamsSchema.safeParse(request.params);
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
       }
 
       const body = orchestrateBodySchema.safeParse(request.body);

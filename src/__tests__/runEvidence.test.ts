@@ -81,7 +81,8 @@ describe("evidence and report scrubbing", () => {
     const html = await renderRunReportHtml(report);
     expect(html).toContain("Failed 1");
     expect(html).toContain("FAILED STEP:");
-    expect(html).toContain("expect text missing");
+    expect(html).toContain("Confirm that “missing” appears on the page.");
+    expect(html).not.toContain("fill #email");
     expect(html).not.toContain(credentials.email);
     expect(html).not.toContain(credentials.password);
   });
@@ -232,4 +233,3 @@ describe("credential redaction in API responses and database", () => {
     await app.close();
   });
 });
-

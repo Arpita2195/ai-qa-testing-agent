@@ -110,24 +110,47 @@ export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {
     }
 
     function selectorFor(element) {
+      const tagName = element.tagName.toLowerCase();
+      const isUnique = (selector) => document.querySelectorAll(selector).length === 1;
+
       if (element instanceof HTMLElement && element.id) {
         const idSelector = "#" + CSS.escape(element.id);
-        if (document.querySelectorAll(idSelector).length === 1) {
+        if (isUnique(idSelector)) {
           return idSelector;
         }
+      }
+
+      for (const attribute of ["data-testid", "data-test", "data-qa", "name", "aria-label", "placeholder"]) {
+        const value = element.getAttribute(attribute);
+        if (!value) continue;
+        const candidate = tagName + "[" + attribute + "=" + JSON.stringify(value) + "]";
+        if (isUnique(candidate)) return candidate;
+      }
+
+      if (element instanceof HTMLAnchorElement && element.getAttribute("href")) {
+        const candidate = "a[href=" + JSON.stringify(element.getAttribute("href")) + "]";
+        if (isUnique(candidate)) return candidate;
+      }
+
+      if (
+        (element instanceof HTMLInputElement || element instanceof HTMLButtonElement) &&
+        element.type
+      ) {
+        const candidate = tagName + "[type=" + JSON.stringify(element.type) + "]";
+        if (isUnique(candidate)) return candidate;
       }
 
       const parts = [];
       let current = element;
       while (current && current !== document.documentElement) {
-        const tagName = current.tagName.toLowerCase();
+        const currentTag = current.tagName.toLowerCase();
         const siblings = current.parentElement
           ? Array.from(current.parentElement.children).filter(
               (sibling) => sibling.tagName === current.tagName,
             )
           : [];
         const index = siblings.indexOf(current) + 1;
-        parts.unshift(tagName + ":nth-of-type(" + index + ")");
+        parts.unshift(currentTag + ":nth-of-type(" + index + ")");
         current = current.parentElement;
       }
 
@@ -323,7 +346,10 @@ export async function readSite(
   projectOrUrl: string | { id: string; base_url: string; name?: string },
   options: ReadSiteOptions = {},
 ): Promise<SiteData> {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
   const startTime = Date.now();
   const TOTAL_TIMEOUT_MS = 120000;
 
@@ -450,15 +476,20 @@ export async function readSite(
 
 export async function readPage(url: string, steps: string[] = []): Promise<PageData> {
   await assertTargetUrlAllowed(url);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
 
   try {
     const page = await browser.newPage();
     attachUrlGuardToPage(page);
     await page.goto(url, { waitUntil: "domcontentloaded" });
+    await waitForRealContent(page, 30000);
     for (const step of steps) {
       await executePageStep(page, url, resolveStepPlaceholders(step));
     }
+    await waitForRealContent(page, 30000);
 
     return await page.evaluate<PageData>(`(() => {
       function visible(element) {
@@ -473,24 +504,47 @@ export async function readPage(url: string, steps: string[] = []): Promise<PageD
       }
 
       function selectorFor(element) {
+        const tagName = element.tagName.toLowerCase();
+        const isUnique = (selector) => document.querySelectorAll(selector).length === 1;
+
         if (element instanceof HTMLElement && element.id) {
           const idSelector = "#" + CSS.escape(element.id);
-          if (document.querySelectorAll(idSelector).length === 1) {
+          if (isUnique(idSelector)) {
             return idSelector;
           }
+        }
+
+        for (const attribute of ["data-testid", "data-test", "data-qa", "name", "aria-label", "placeholder"]) {
+          const value = element.getAttribute(attribute);
+          if (!value) continue;
+          const candidate = tagName + "[" + attribute + "=" + JSON.stringify(value) + "]";
+          if (isUnique(candidate)) return candidate;
+        }
+
+        if (element instanceof HTMLAnchorElement && element.getAttribute("href")) {
+          const candidate = "a[href=" + JSON.stringify(element.getAttribute("href")) + "]";
+          if (isUnique(candidate)) return candidate;
+        }
+
+        if (
+          (element instanceof HTMLInputElement || element instanceof HTMLButtonElement) &&
+          element.type
+        ) {
+          const candidate = tagName + "[type=" + JSON.stringify(element.type) + "]";
+          if (isUnique(candidate)) return candidate;
         }
 
         const parts = [];
         let current = element;
         while (current && current !== document.documentElement) {
-          const tagName = current.tagName.toLowerCase();
+          const currentTag = current.tagName.toLowerCase();
           const siblings = current.parentElement
             ? Array.from(current.parentElement.children).filter(
                 (sibling) => sibling.tagName === current.tagName,
               )
             : [];
           const index = siblings.indexOf(current) + 1;
-          parts.unshift(tagName + ":nth-of-type(" + index + ")");
+          parts.unshift(currentTag + ":nth-of-type(" + index + ")");
           current = current.parentElement;
         }
 
@@ -549,7 +603,10 @@ export async function readPage(url: string, steps: string[] = []): Promise<PageD
 
 export async function savePageScreenshot(url: string): Promise<string> {
   await assertTargetUrlAllowed(url);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
   try {
     const page = await browser.newPage();
     attachUrlGuardToPage(page);
@@ -559,4 +616,3 @@ export async function savePageScreenshot(url: string): Promise<string> {
     await browser.close().catch(() => {});
   }
 }
-

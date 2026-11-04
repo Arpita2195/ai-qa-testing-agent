@@ -96,7 +96,10 @@ export async function runVisualCheck(
   await mkdir(artifactsDirectory, { recursive: true });
   const screenshotName = `visual-${check.id}-${randomUUID()}.png`;
   const screenshotPath = path.join(artifactsDirectory, screenshotName);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
 
   try {
     const page = await browser.newPage({

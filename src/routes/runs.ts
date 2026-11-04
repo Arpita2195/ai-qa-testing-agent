@@ -13,6 +13,7 @@ import {
   type WebResultStatus,
 } from "../services/runner";
 import { writeRunReport } from "../services/runReport";
+import { assertProjectAccess } from "../services/authService";
 
 const runBodySchema = z.object({
   include_non_approved: z.boolean().default(false),
@@ -105,6 +106,10 @@ const runRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!params.success) {
         return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+      }
+
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
       }
 
       const body = runBodySchema.safeParse(request.body ?? {});
@@ -255,6 +260,10 @@ const runRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!run) {
       return reply.code(404).send({ error: "Test run not found" });
+    }
+
+    if (request.user) {
+      await assertProjectAccess(request.user, run.project_id, "viewer");
     }
 
     const results = await pool.query<TestResultRow>(

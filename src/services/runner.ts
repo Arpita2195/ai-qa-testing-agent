@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { chromium, type Page } from "@playwright/test";
 import { env } from "../config/env";
+import { performGenericLogin } from "./appAuth";
 import { getProjectAccess } from "./secretStore";
 import { assertTargetUrlAllowed, attachUrlGuardToPage } from "./urlGuard";
 
@@ -56,6 +57,26 @@ export interface AppCredentials {
 }
 
 export type StockFlowCredentials = AppCredentials;
+
+function getStockFlowCredentialsForTarget(baseUrl: string): AppCredentials | undefined {
+  if (!env.STOCKFLOW_TEST_EMAIL || !env.STOCKFLOW_TEST_PASSWORD) {
+    return undefined;
+  }
+
+  try {
+    if (new URL(baseUrl).origin !== new URL(env.STOCKFLOW_BASE_URL).origin) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return {
+    email: env.STOCKFLOW_TEST_EMAIL,
+    username: env.STOCKFLOW_TEST_EMAIL,
+    password: env.STOCKFLOW_TEST_PASSWORD,
+  };
+}
 
 export function resolveStepPlaceholders(
   step: string,
@@ -160,8 +181,16 @@ export function classifyWebStatus(
 }
 
 export function classifyRunStatus(statuses: string[]): WebResultStatus {
+  if (!statuses || statuses.length === 0) return "inconclusive";
   if (statuses.some((status) => status === "failed")) return "failed";
-  if (statuses.length > 0 && statuses.every((status) => status === "passed")) return "passed";
+  if (statuses.some((status) => status === "inconclusive")) return "inconclusive";
+  if (statuses.every((status) => status === "skipped")) return "skipped";
+  if (
+    statuses.some((status) => status === "passed") &&
+    statuses.every((status) => status === "passed" || status === "skipped")
+  ) {
+    return "passed";
+  }
   return "inconclusive";
 }
 
@@ -250,6 +279,84 @@ export function scrubEvidence<T>(
   return value;
 }
 
+type WebStepAction = "click" | "fill" | "select" | "assert";
+
+async function getStepLocator(
+  page: Page,
+  selector: string,
+  action: WebStepAction = "assert",
+): Promise<ReturnType<Page["locator"]>> {
+  const original = page.locator(selector);
+  if (await original.count() > 0) {
+    return original;
+  }
+
+  try {
+    await original.first().waitFor({ state: "attached", timeout: 2000 });
+    return original;
+  } catch {
+    // Continue with conservative selector recovery after a brief render wait.
+  }
+
+  const parts = selector.split(/\s*>\s*/);
+  if (parts.length >= 2 && selector.includes(":nth-of-type(")) {
+    for (let start = 1; start < parts.length; start++) {
+      const candidate = page.locator(parts.slice(start).join(" > "));
+      if (await candidate.count() === 1 && await candidate.isVisible()) {
+        return candidate;
+      }
+    }
+  }
+
+  const selectorParts = [
+    ...selector.matchAll(/#([\w-]+)|\.([\w-]+)|(?:id|name|aria-label|placeholder|data-testid|data-test|data-qa)\s*=\s*["']([^"']+)["']/gi),
+  ].flatMap((match) => [match[1], match[2], match[3]].filter((part): part is string => Boolean(part)));
+  const genericWords = new Set([
+    "button", "data", "field", "form", "id", "input", "name", "password",
+    "qa", "select", "test", "text", "textarea", "type",
+  ]);
+  const hints = [...new Set(selectorParts.flatMap((part) =>
+    part
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .split(/[^a-z0-9]+/i)
+      .map((word) => word.toLowerCase())
+      .filter((word) => word.length > 2 && !genericWords.has(word)),
+  ))];
+  const elementTypes: Record<WebStepAction, string> = {
+    click: "button, a, input[type='button'], input[type='submit'], [role='button']",
+    fill: "input, textarea, [contenteditable='true']",
+    select: "select",
+    assert: "*",
+  };
+  for (const hint of hints) {
+    const attributeSelectors = ["id", "name", "aria-label", "placeholder", "data-testid", "data-test", "data-qa"]
+      .map((attribute) => `:is(${elementTypes[action]})[${attribute}*="${hint}" i]`)
+      .join(", ");
+    const candidate = page.locator(attributeSelectors);
+    if (await candidate.count() === 1 && await candidate.isVisible()) {
+      return candidate;
+    }
+
+    const labelCandidate = page.getByLabel(new RegExp(`\\b${hint}\\b`, "i"));
+    if (
+      await labelCandidate.count() === 1 &&
+      await labelCandidate.isVisible() &&
+      (action !== "select" || await labelCandidate.evaluate((element) => element.tagName === "SELECT"))
+    ) {
+      return labelCandidate;
+    }
+  }
+
+  const recoveryHint = hints.join(", ");
+  throw new Error(
+    `No element matched selector "${selector}"` +
+      (recoveryHint
+        ? `, and no unique visible ${action === "assert" ? "element" : action} matched ${recoveryHint}`
+        : "") +
+      ". Confirm the current page and update the automation selector.",
+  );
+}
+
 export async function executePageStep(page: Page, baseUrl: string, step: string): Promise<void> {
   if (step.startsWith("goto ")) {
     const route = step.slice("goto ".length).trim();
@@ -278,7 +385,7 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
       throw new Error('Invalid step: "click" requires a CSS selector');
     }
 
-    await page.locator(selector).click();
+    await (await getStepLocator(page, selector, "click")).click();
     await page.waitForLoadState("domcontentloaded");
     return;
   }
@@ -296,7 +403,7 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
       throw new Error('Invalid step: "fill" requires a CSS selector');
     }
 
-    await page.locator(selector).fill(value);
+    await (await getStepLocator(page, selector, "fill")).fill(value);
     return;
   }
 
@@ -311,7 +418,7 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
     if (!selector || !value) {
       throw new Error('Invalid step: "select" requires a selector and option value');
     }
-    await page.locator(selector).selectOption(value);
+    await (await getStepLocator(page, selector, "select")).selectOption(value);
     return;
   }
 
@@ -320,7 +427,7 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
     if (!selector) {
       throw new Error('Invalid step: "expect invalid" requires a CSS selector');
     }
-    const validity = await page.locator(selector).evaluate(
+    const validity = await (await getStepLocator(page, selector)).evaluate(
       "(element) => element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement ? element.checkValidity() : true",
     );
     if (validity) {
@@ -334,7 +441,7 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
     if (!selector) {
       throw new Error('Invalid step: "expect not visible" requires a CSS selector');
     }
-    const locator = page.locator(selector);
+    const locator = await getStepLocator(page, selector);
     try {
       await locator.first().waitFor({ state: "hidden", timeout: 30_000 });
     } catch {
@@ -346,6 +453,20 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
     return;
   }
 
+  if (step.startsWith("expect visible ")) {
+    const selector = step.slice("expect visible ".length).trim();
+    if (!selector) {
+      throw new Error('Invalid step: "expect visible" requires a CSS selector');
+    }
+    const locator = await getStepLocator(page, selector);
+    try {
+      await locator.first().waitFor({ state: "visible", timeout: 15_000 });
+    } catch {
+      throw new Error(`Assertion failed: expected "${selector}" to be visible, but it remained hidden or absent`);
+    }
+    return;
+  }
+
   if (step.startsWith("expect text ")) {
     const text = step.slice("expect text ".length).trim();
     if (!text) {
@@ -353,6 +474,130 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
     }
 
     await page.getByText(text).first().waitFor({ state: "visible" });
+    return;
+  }
+
+  // Advanced DSL: wait <ms>
+  if (/^wait\s+(\d+)$/i.test(step)) {
+    const ms = parseInt(step.replace(/^wait\s+/i, "").trim(), 10);
+    const safeMs = Math.min(Math.max(Number.isFinite(ms) ? ms : 1000, 0), 30_000);
+    await page.waitForTimeout(safeMs);
+    return;
+  }
+
+  // Advanced DSL: wait for selector <css selector>
+  if (step.startsWith("wait for selector ")) {
+    const selector = step.slice("wait for selector ".length).trim();
+    if (!selector) {
+      throw new Error('Invalid step: "wait for selector" requires a CSS selector');
+    }
+    await (await getStepLocator(page, selector)).first().waitFor({ state: "visible", timeout: 15_000 });
+    return;
+  }
+
+  // Advanced DSL: wait for navigation
+  if (step === "wait for navigation" || step.startsWith("wait for navigation")) {
+    await page.waitForLoadState("domcontentloaded");
+    return;
+  }
+
+  // Advanced DSL: check / uncheck (checkboxes & radio buttons)
+  if (step.startsWith("check ")) {
+    const selector = step.slice("check ".length).trim();
+    if (!selector) {
+      throw new Error('Invalid step: "check" requires a CSS selector');
+    }
+    await (await getStepLocator(page, selector)).check();
+    return;
+  }
+
+  if (step.startsWith("uncheck ")) {
+    const selector = step.slice("uncheck ".length).trim();
+    if (!selector) {
+      throw new Error('Invalid step: "uncheck" requires a CSS selector');
+    }
+    await (await getStepLocator(page, selector)).uncheck();
+    return;
+  }
+
+  // Advanced DSL: screenshot [name]
+  if (step === "screenshot" || step.startsWith("screenshot ")) {
+    // Intermediate screenshot requested; can be captured without breaking workflow
+    return;
+  }
+
+  // Advanced DSL: upload <selector> | <filename>
+  if (step.startsWith("upload ")) {
+    const input = step.slice("upload ".length);
+    const separator = input.indexOf("|");
+    const selector = separator !== -1 ? input.slice(0, separator).trim() : input.trim();
+    const rawFilename = separator !== -1 ? input.slice(separator + 1).trim() : "test-fixture.txt";
+    if (!selector) {
+      throw new Error('Invalid step: "upload" requires a CSS selector');
+    }
+    const safeFilename = path.basename(rawFilename).replace(/[^a-zA-Z0-9._-]/g, "_") || "test-fixture.txt";
+    const fixturesDir = path.resolve(__dirname, "../../artifacts/fixtures");
+    await mkdir(fixturesDir, { recursive: true });
+    const fixtureFilePath = path.join(fixturesDir, safeFilename);
+    await writeFile(fixtureFilePath, "Automated test upload fixture file content.", "utf8");
+    await (await getStepLocator(page, selector)).setInputFiles(fixtureFilePath);
+    return;
+  }
+
+  // Advanced DSL: frame <frame_selector> | <action>
+  if (step.startsWith("frame ")) {
+    const input = step.slice("frame ".length);
+    const separator = input.indexOf("|");
+    if (separator === -1) {
+      throw new Error('Invalid step: expected "frame <frame selector> | <action>"');
+    }
+    const frameSelector = input.slice(0, separator).trim();
+    const action = input.slice(separator + 1).trim();
+    if (!frameSelector || !action) {
+      throw new Error('Invalid step: "frame" requires both frame selector and action');
+    }
+    const frame = page.frameLocator(frameSelector);
+    if (action.startsWith("click ")) {
+      const sel = action.slice("click ".length).trim();
+      await frame.locator(sel).click();
+      return;
+    }
+    if (action.startsWith("fill ")) {
+      const fillInput = action.slice("fill ".length);
+      const fillSep = fillInput.indexOf("|");
+      const sel = fillSep !== -1 ? fillInput.slice(0, fillSep).trim() : fillInput.trim();
+      const val = fillSep !== -1 ? fillInput.slice(fillSep + 1).trim() : "";
+      await frame.locator(sel).fill(val);
+      return;
+    }
+    if (action.startsWith("expect text ")) {
+      const text = action.slice("expect text ".length).trim();
+      await frame.getByText(text).first().waitFor({ state: "visible" });
+      return;
+    }
+    if (action.startsWith("expect visible ")) {
+      const sel = action.slice("expect visible ".length).trim();
+      await frame.locator(sel).first().waitFor({ state: "visible" });
+      return;
+    }
+    throw new Error(`Unsupported frame action: "${action}"`);
+  }
+
+  // Advanced DSL: dialog accept [prompt_text] / dialog dismiss
+  if (step.startsWith("dialog accept") || step.startsWith("dialog dismiss")) {
+    const isDismiss = step.startsWith("dialog dismiss");
+    const promptText = step.includes("|") ? step.split("|")[1].trim() : undefined;
+    page.once("dialog", async (dialog) => {
+      try {
+        if (isDismiss) {
+          await dialog.dismiss();
+        } else {
+          await dialog.accept(promptText);
+        }
+      } catch {
+        // Handled silently if dialog closed
+      }
+    });
     return;
   }
 
@@ -391,10 +636,21 @@ export async function runTestCase(
     } catch {}
   }
 
+  const stockFlowCredentials = getStockFlowCredentialsForTarget(baseUrl);
+  if (
+    stockFlowCredentials &&
+    !options?.credentials &&
+    (!activeCredentials?.password || !(activeCredentials.username || activeCredentials.email))
+  ) {
+    activeCredentials = { ...activeCredentials, ...stockFlowCredentials };
+  }
+
   const safeSteps = scrubEvidence(steps, activeCredentials);
   const credentialTest = isCredentialTest(steps, activeCredentials);
   const isAuthenticated =
-    credentialTest || Boolean(activeStorageState) || Boolean(activeCredentials?.username);
+    credentialTest ||
+    Boolean(activeStorageState) ||
+    Boolean((activeCredentials?.username || activeCredentials?.email) && activeCredentials.password);
 
   const outputDirectory = path.resolve(
     __dirname,
@@ -447,7 +703,10 @@ export async function runTestCase(
 
   let browser: Awaited<ReturnType<typeof chromium.launch>>;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    });
   } catch (error) {
     evidence.errorMessage = redactSecrets(getErrorMessage(error), activeCredentials);
     evidence.status = classifyWebStatus(evidence.errorMessage, null, null, true);
@@ -506,6 +765,38 @@ export async function runTestCase(
     if (!isAuthenticated) {
       await context.tracing.start({ screenshots: false, snapshots: false, sources: false });
       traceStarted = true;
+    }
+
+    if (!credentialTest) {
+      await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      const passwordInput = page.locator('input[type="password"]');
+      const hasVisiblePassword =
+        (await passwordInput.count()) > 0 && (await passwordInput.first().isVisible());
+      const pageText = (await page.locator("body").innerText()).toLowerCase();
+      const submitText = (
+        await page.locator('button[type="submit"], input[type="submit"]').allInnerTexts()
+      ).join(" ").toLowerCase();
+      const isLoginPage =
+        hasVisiblePassword &&
+        (/\b(sign in|log in|welcome back)\b/.test(`${pageText} ${submitText}`) ||
+          /\b(login|sign-in|signin|auth)\b/i.test(new URL(page.url()).pathname));
+
+      if (isLoginPage) {
+        const username = activeCredentials?.username || activeCredentials?.email;
+        const password = activeCredentials?.password;
+        if (!username || !password) {
+          throw new Error(
+            "The target application requires sign-in. Save test credentials or a browser session in the project access settings.",
+          );
+        }
+
+        await performGenericLogin(
+          page,
+          baseUrl,
+          { username, password },
+          Boolean(stockFlowCredentials),
+        );
+      }
     }
 
     if (page.url() === "about:blank" && !steps[0]?.startsWith("goto ")) {

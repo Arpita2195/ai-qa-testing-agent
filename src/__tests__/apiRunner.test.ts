@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runApiTest, type ApiEndpoint } from "../services/apiRunner";
+import {
+  runApiTest,
+  classifyRunStatus,
+  classifyApiRunStatus,
+  isNetworkOrInfrastructureError,
+  type ApiEndpoint,
+} from "../services/apiRunner";
 
 const endpoint: ApiEndpoint = {
   method: "GET",
@@ -71,3 +77,109 @@ describe("runApiTest assertions", () => {
     expect(result.responseSnippet).toContain('"id":1');
   });
 });
+
+describe("runApiTest infrastructure and network error handling", () => {
+  it("classifies request timeout as inconclusive", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const error = new Error("The operation was aborted");
+        error.name = "AbortError";
+        throw error;
+      }),
+    );
+    const result = await runApiTest("https://example.test", {
+      ...endpoint,
+      timeout_ms: 50,
+    });
+    expect(result.status).toBe("inconclusive");
+    expect(result.errorMessage).toContain("Request timeout");
+  });
+
+  it("classifies DNS failure (ENOTFOUND) as inconclusive", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const error = new TypeError("fetch failed");
+        (error as any).cause = { code: "ENOTFOUND", message: "getaddrinfo ENOTFOUND example.invalid" };
+        throw error;
+      }),
+    );
+    const result = await runApiTest("https://example.test", endpoint);
+    expect(result.status).toBe("inconclusive");
+    expect(result.errorMessage).toContain("Network/Infrastructure error");
+  });
+
+  it("classifies connection refused (ECONNREFUSED) as inconclusive", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const error = new TypeError("fetch failed");
+        (error as any).cause = { code: "ECONNREFUSED", message: "connect ECONNREFUSED 127.0.0.1:8080" };
+        throw error;
+      }),
+    );
+    const result = await runApiTest("https://example.test", endpoint);
+    expect(result.status).toBe("inconclusive");
+    expect(result.errorMessage).toContain("Network/Infrastructure error");
+  });
+
+  it("classifies skipped endpoint as skipped", async () => {
+    const result = await runApiTest("https://example.test", {
+      ...endpoint,
+      skip: true,
+      skip_reason: "Feature flag disabled",
+    });
+    expect(result.status).toBe("skipped");
+    expect(result.errorMessage).toBe("Feature flag disabled");
+    expect(result.actualStatus).toBeNull();
+  });
+
+  it("classifies disabled endpoint as skipped", async () => {
+    const result = await runApiTest("https://example.test", {
+      ...endpoint,
+      enabled: false,
+    });
+    expect(result.status).toBe("skipped");
+    expect(result.errorMessage).toContain("skipped");
+  });
+
+  it("detects network or infrastructure error via helper", () => {
+    expect(isNetworkOrInfrastructureError(new Error("socket hang up"))).toBe(true);
+    expect(isNetworkOrInfrastructureError({ code: "ECONNRESET" })).toBe(true);
+    expect(isNetworkOrInfrastructureError({ cause: { code: "EHOSTUNREACH" } })).toBe(true);
+    expect(isNetworkOrInfrastructureError(new Error("Status assertion failed"))).toBe(false);
+  });
+});
+
+describe("overall API and run status calculation", () => {
+  it("never classifies empty results as passed", () => {
+    expect(classifyRunStatus([])).toBe("inconclusive");
+    expect(classifyApiRunStatus([])).toBe("inconclusive");
+  });
+
+  it("classifies all passed results as passed", () => {
+    expect(classifyRunStatus(["passed", "passed"])).toBe("passed");
+  });
+
+  it("classifies passed with skipped results as passed", () => {
+    expect(classifyRunStatus(["passed", "skipped"])).toBe("passed");
+  });
+
+  it("classifies all skipped results as skipped", () => {
+    expect(classifyRunStatus(["skipped", "skipped"])).toBe("skipped");
+  });
+
+  it("prioritizes failed when any test fails", () => {
+    expect(classifyRunStatus(["passed", "failed"])).toBe("failed");
+    expect(classifyRunStatus(["skipped", "failed"])).toBe("failed");
+    expect(classifyRunStatus(["inconclusive", "failed"])).toBe("failed");
+  });
+
+  it("classifies inconclusive when infrastructure errors exist without failure", () => {
+    expect(classifyRunStatus(["passed", "inconclusive"])).toBe("inconclusive");
+    expect(classifyRunStatus(["skipped", "inconclusive"])).toBe("inconclusive");
+    expect(classifyRunStatus(["inconclusive"])).toBe("inconclusive");
+  });
+});
+
