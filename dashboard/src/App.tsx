@@ -3149,14 +3149,12 @@ function AutomationsTab({ projectId }: { projectId: string }) {
                       {/* Evidence Links */}
                       {liveResult?.screenshot_path && (
                         <div style={{ marginTop: "8px" }}>
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() => window.open(`${apiBase}/${liveResult.screenshot_path}`, "_blank")}
-                            style={{ padding: "4px 10px", fontSize: "0.8rem" }}
-                          >
-                            View screenshot
-                          </button>
+                          <RunFileButton
+                            runId={liveResult.run_id}
+                            resultId={liveResult.result_id}
+                            file="screenshot.png"
+                            label="View screenshot"
+                          />
                         </div>
                       )}
                     </div>
@@ -4964,6 +4962,12 @@ function RunFileButton({
   const [error, setError] = useState("");
   async function openFile() {
     setError("");
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) {
+      setError("Allow pop-ups to open this file.");
+      return;
+    }
+    popup.opener = null;
     try {
       const route = resultId
         ? `/runs/${encodeURIComponent(runId)}/evidence/${encodeURIComponent(resultId)}/${encodeURIComponent(file)}`
@@ -4971,9 +4975,10 @@ function RunFileButton({
       const response = await fetch(`${apiBase}${route}`, { credentials: "include" });
       if (!response.ok) throw new Error(`File request failed (${response.status})`);
       const blobUrl = URL.createObjectURL(await response.blob());
-      window.open(blobUrl, "_blank", "noopener,noreferrer");
+      popup.location.href = blobUrl;
       window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
     } catch (reason) {
+      popup.close();
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
