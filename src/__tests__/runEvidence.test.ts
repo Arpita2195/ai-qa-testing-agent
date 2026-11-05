@@ -105,6 +105,97 @@ describe("run evidence routes", () => {
     expect(mocked.query).not.toHaveBeenCalled();
     await app.close();
   });
+
+  it("serves reports and per-endpoint evidence for API runs", async () => {
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const resultId = "22222222-2222-4222-8222-222222222222";
+    mocked.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("JOIN projects")) {
+        return {
+          rows: [{
+            id: runId,
+            projectId: "33333333-3333-4333-8333-333333333333",
+            projectName: "Inventory",
+            baseUrl: "https://example.invalid",
+            runType: "api",
+            status: "passed",
+            startedAt: new Date("2026-11-05T00:00:00.000Z"),
+            finishedAt: new Date("2026-11-05T00:00:01.000Z"),
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM test_runs")) {
+        return { rows: [{ project_id: "33333333-3333-4333-8333-333333333333", run_type: "api" }], rowCount: 1 };
+      }
+      if (sql.includes("FROM api_test_results")) {
+        const apiResult = {
+          id: resultId,
+          endpointId: "44444444-4444-4444-8444-444444444444",
+          endpointName: "Inventory",
+          method: "GET",
+          path: "/api/inventory",
+          status: "passed",
+          actualStatus: 200,
+          responseMs: 42,
+          errorMessage: null,
+          responseSnippet: '[{"id":1}]',
+          stepResults: null,
+          createdAt: new Date("2026-11-05T00:00:00.500Z"),
+        };
+        if (sql.includes('"endpointId"')) return { rows: [apiResult], rowCount: 1 };
+        return {
+          rows: [{
+            id: resultId,
+            run_id: runId,
+            endpoint_id: "44444444-4444-4444-8444-444444444444",
+            endpoint_name: "Inventory",
+            method: "GET",
+            path: "/api/inventory",
+            status: "passed",
+            actual_status: 200,
+            response_ms: 42,
+            error_message: null,
+            response_snippet: '[{"id":1}]',
+            step_results: null,
+            created_at: new Date("2026-11-05T00:00:00.500Z"),
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM test_results")) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 };
+    });
+
+    const app = Fastify();
+    await app.register(runEvidenceRoutes);
+
+    const html = await app.inject({ method: "GET", url: `/runs/${runId}/report` });
+    expect(html.statusCode).toBe(200);
+    expect(html.headers["content-type"]).toContain("text/html");
+    expect(html.body).toContain("API test run report");
+    expect(html.body).toContain("GET /api/inventory");
+
+    const json = await app.inject({ method: "GET", url: `/runs/${runId}/report.json` });
+    expect(json.statusCode).toBe(200);
+    expect(json.json()).toMatchObject({
+      run: { id: runId, runType: "api" },
+      apiTests: [{ id: resultId, endpointName: "Inventory", actualStatus: 200 }],
+    });
+
+    const evidence = await app.inject({
+      method: "GET",
+      url: `/runs/${runId}/evidence/${resultId}/evidence.json`,
+    });
+    expect(evidence.statusCode).toBe(200);
+    expect(evidence.json()).toMatchObject({
+      id: resultId,
+      endpoint_name: "Inventory",
+      response_snippet: '[{"id":1}]',
+    });
+
+    await app.close();
+  });
 });
 
 describe("credential redaction in API responses and database", () => {

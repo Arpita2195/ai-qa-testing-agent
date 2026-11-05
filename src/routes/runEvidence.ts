@@ -13,6 +13,91 @@ const evidenceParams = z.object({
   file: z.enum(["screenshot.png", "trace.zip", "evidence.json"]),
 });
 
+interface ApiRunReport {
+  run: {
+    id: string;
+    projectId: string;
+    projectName: string;
+    baseUrl: string;
+    runType: string;
+    status: string;
+    startedAt: Date;
+    finishedAt: Date | null;
+  };
+  apiTests: Array<{
+    id: string;
+    endpointId: string | null;
+    endpointName: string | null;
+    method: string | null;
+    path: string | null;
+    status: string;
+    actualStatus: number | null;
+    responseMs: number;
+    errorMessage: string | null;
+    responseSnippet: string;
+    stepResults: unknown;
+    createdAt: Date;
+  }>;
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function renderApiRunReportHtml(report: ApiRunReport): string {
+  const rows = report.apiTests.map((test) => `
+    <tr>
+      <td>${escapeHtml(test.endpointName ?? "API endpoint")}</td>
+      <td>${escapeHtml(`${test.method ?? ""} ${test.path ?? ""}`.trim())}</td>
+      <td>${escapeHtml(test.status)}</td>
+      <td>${escapeHtml(test.actualStatus ?? "—")}</td>
+      <td>${escapeHtml(test.responseMs)} ms</td>
+      <td>${escapeHtml(test.errorMessage ?? "")}</td>
+    </tr>`).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>API run ${escapeHtml(report.run.id)} report</title>
+    <style>body{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 18px;color:#202b37;background:#f5f7f9}h1{color:#17324d}.summary,table{background:#fff;border:1px solid #dbe2ea;border-radius:8px;padding:16px;margin:14px 0}table{width:100%;border-collapse:collapse;padding:0}th,td{text-align:left;padding:10px;border-bottom:1px solid #e2e8f0}th{background:#eef3f6}.error{color:#a13232}</style></head><body>
+    <h1>API test run report</h1>
+    <section class="summary"><p><b>Project:</b> ${escapeHtml(report.run.projectName)}</p>
+    <p><b>Base URL:</b> ${escapeHtml(report.run.baseUrl)}</p>
+    <p><b>Run:</b> ${escapeHtml(report.run.id)} · <b>Status:</b> ${escapeHtml(report.run.status)}</p>
+    <p><b>Started:</b> ${escapeHtml(report.run.startedAt.toISOString())} · <b>Finished:</b> ${escapeHtml(report.run.finishedAt?.toISOString() ?? "In progress")}</p></section>
+    <h2>Endpoint results</h2><table><thead><tr><th>Endpoint</th><th>Request</th><th>Result</th><th>HTTP</th><th>Duration</th><th>Error</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No API results recorded.</td></tr>'}</tbody></table>
+    </body></html>`;
+}
+
+async function loadApiRunReport(runId: string): Promise<ApiRunReport | null> {
+  const runResult = await pool.query<ApiRunReport["run"]>(
+    `SELECT tr.id, tr.project_id AS "projectId", p.name AS "projectName",
+            p.base_url AS "baseUrl", tr.run_type AS "runType", tr.status,
+            tr.started_at AS "startedAt", tr.finished_at AS "finishedAt"
+     FROM test_runs tr
+     JOIN projects p ON p.id = tr.project_id
+     WHERE tr.id = $1 AND tr.run_type = 'api'`,
+    [runId],
+  );
+  const run = runResult.rows[0];
+  if (!run) return null;
+
+  const resultRows = await pool.query<ApiRunReport["apiTests"][number]>(
+    `SELECT ar.id, ar.endpoint_id AS "endpointId", ae.name AS "endpointName",
+            ae.method, ae.path, ar.status, ar.actual_status AS "actualStatus",
+            ar.response_ms AS "responseMs", ar.error_message AS "errorMessage",
+            ar.response_snippet AS "responseSnippet", ar.step_results AS "stepResults",
+            ar.created_at AS "createdAt"
+     FROM api_test_results ar
+     LEFT JOIN api_endpoints ae ON ae.id = ar.endpoint_id
+     WHERE ar.run_id = $1
+     ORDER BY ar.created_at`,
+    [runId],
+  );
+  return { run, apiTests: resultRows.rows };
+}
+
 async function sendFile(
   absolutePath: string,
   contentType: string,
@@ -45,10 +130,15 @@ const runEvidenceRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>("/runs/:id/report", async (request, reply) => {
     const params = runParams.safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: "Invalid run id: expected a UUID" });
-    const run = await pool.query<{ project_id: string }>("SELECT project_id FROM test_runs WHERE id = $1", [params.data.id]);
+    const run = await pool.query<{ project_id: string; run_type: string }>("SELECT project_id, run_type FROM test_runs WHERE id = $1", [params.data.id]);
     if (run.rowCount === 0) return reply.code(404).send({ error: "Test run not found" });
     if (request.user) {
       await assertProjectAccess(request.user, run.rows[0].project_id, "viewer");
+    }
+    if (run.rows[0].run_type === "api") {
+      const report = await loadApiRunReport(params.data.id);
+      if (!report) return reply.code(404).send({ error: "API run report not found" });
+      return reply.type("text/html; charset=utf-8").send(renderApiRunReportHtml(report));
     }
     const reportPath = path.resolve(__dirname, "../../artifacts/runs", params.data.id, "report.html");
     const storageKey = `runs/${params.data.id}/report.html`;
@@ -58,10 +148,15 @@ const runEvidenceRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>("/runs/:id/report.json", async (request, reply) => {
     const params = runParams.safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: "Invalid run id: expected a UUID" });
-    const run = await pool.query<{ project_id: string }>("SELECT project_id FROM test_runs WHERE id = $1", [params.data.id]);
+    const run = await pool.query<{ project_id: string; run_type: string }>("SELECT project_id, run_type FROM test_runs WHERE id = $1", [params.data.id]);
     if (run.rowCount === 0) return reply.code(404).send({ error: "Test run not found" });
     if (request.user) {
       await assertProjectAccess(request.user, run.rows[0].project_id, "viewer");
+    }
+    if (run.rows[0].run_type === "api") {
+      const report = await loadApiRunReport(params.data.id);
+      if (!report) return reply.code(404).send({ error: "API run report not found" });
+      return reply.type("application/json; charset=utf-8").send(report);
     }
     const reportPath = path.resolve(__dirname, "../../artifacts/runs", params.data.id, "report.json");
     const storageKey = `runs/${params.data.id}/report.json`;
@@ -84,6 +179,19 @@ const runEvidenceRoutes: FastifyPluginAsync = async (fastify) => {
       "SELECT 1 FROM test_results WHERE id = $1 AND run_id = $2",
       [params.data.resultId, params.data.runId],
     );
+    if (result.rowCount === 0 && params.data.file === "evidence.json") {
+      const apiResult = await pool.query(
+        `SELECT ar.id, ar.run_id, ar.endpoint_id, ae.name AS endpoint_name,
+                ae.method, ae.path, ar.status, ar.actual_status, ar.response_ms,
+                ar.error_message, ar.response_snippet, ar.step_results, ar.created_at
+         FROM api_test_results ar
+         LEFT JOIN api_endpoints ae ON ae.id = ar.endpoint_id
+         WHERE ar.id = $1 AND ar.run_id = $2`,
+        [params.data.resultId, params.data.runId],
+      );
+      if (apiResult.rowCount === 0) return reply.code(404).send({ error: "Run evidence not found" });
+      return reply.type("application/json; charset=utf-8").send(apiResult.rows[0]);
+    }
     if (result.rowCount === 0) return reply.code(404).send({ error: "Run evidence not found" });
 
     const evidencePath = path.resolve(
