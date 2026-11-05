@@ -95,7 +95,7 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(500).send({ error: message });
       }
 
-      const { testCases, skipped_invalid } = generationResult;
+      const { testCases, skipped_invalid, generation_mode } = generationResult;
 
       const existingRows = await pool.query<{ title: string }>(
         "SELECT title FROM test_cases WHERE project_id = $1",
@@ -136,10 +136,11 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
       if (createdCases.length === 0) {
         return reply.code(422).send({
           error: "No test cases created",
-          message: `AI generated no new test cases: ${skipped_invalid} invalid, ${skipped_duplicate} duplicate`,
+          message: `Generation produced no new test cases: ${skipped_invalid} invalid, ${skipped_duplicate} duplicate`,
           created: 0,
           skipped_invalid,
           skipped_duplicate,
+          generation_mode,
           test_cases: [],
         });
       }
@@ -148,6 +149,7 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
         created: createdCases.length,
         skipped_invalid,
         skipped_duplicate,
+        generation_mode,
         test_cases: createdCases,
       });
     },

@@ -13,3 +13,5 @@ test-results
 dist
 coverage
 *.log
+dashboard/node_modules
+dashboard/dist

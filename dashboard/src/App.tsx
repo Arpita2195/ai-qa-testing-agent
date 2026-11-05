@@ -1079,9 +1079,7 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
         method: "POST",
         body: JSON.stringify({}),
       });
-      setProgress(
-        `Generated ${result.created} pending test cases (${result.skipped_invalid} skipped, ${result.skipped_duplicate} duplicate).`,
-      );
+      setProgress(formatGenerationMessage(result));
       const cases = await api<TestCase[]>(`/projects/${projectId}/test-cases`);
       setTestCases(cases);
       onProjectCreated();
@@ -1870,7 +1868,19 @@ interface GenerateResponse {
   created: number;
   skipped_invalid: number;
   skipped_duplicate: number;
+  generation_mode?: "ai" | "fallback" | "mixed";
   test_cases: TestCase[];
+}
+
+function formatGenerationMessage(result: GenerateResponse): string {
+  const summary = `Generated ${result.created} pending test cases (${result.skipped_invalid} skipped invalid, ${result.skipped_duplicate} skipped duplicate).`;
+  if (result.generation_mode === "fallback") {
+    return `${summary} Gemini was temporarily unavailable, so basic page-load checks were used. Review them before approval.`;
+  }
+  if (result.generation_mode === "mixed") {
+    return `${summary} Gemini became temporarily unavailable; some cases are basic page-load checks. Review all cases before approval.`;
+  }
+  return summary;
 }
 
 function TestCasesTab({ projectId }: { projectId: string }) {
@@ -1935,9 +1945,7 @@ function TestCasesTab({ projectId }: { projectId: string }) {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setMessage(
-        `Generated ${result.created} pending test cases (${result.skipped_invalid} skipped invalid, ${result.skipped_duplicate} skipped duplicate).`,
-      );
+      setMessage(formatGenerationMessage(result));
       reload();
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));

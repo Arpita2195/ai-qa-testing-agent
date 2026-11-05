@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocked = vi.hoisted(() => ({ responseText: "", prompt: "" }));
+const mocked = vi.hoisted(() => ({
+  responseText: "",
+  prompt: "",
+  error: null as Error | null,
+}));
 
 vi.mock("@google/genai", () => ({
   GoogleGenAI: class {
     models = {
       generateContent: async ({ contents }: { contents: string }) => {
         mocked.prompt = contents;
+        if (mocked.error) throw mocked.error;
         return { text: mocked.responseText };
       },
     };
@@ -56,6 +61,7 @@ describe("generated test case validation", () => {
   beforeEach(() => {
     vi.resetModules();
     mocked.prompt = "";
+    mocked.error = null;
     mocked.responseText = JSON.stringify([
       generatedCase("Fill with sample", "fill #email | Sample text"),
       generatedCase("Unknown selector", "fill #missing | Sample text"),
@@ -126,6 +132,50 @@ describe("generated test case validation", () => {
       "Valid text check",
     ]);
     expect(result.skipped_invalid).toBe(1);
+  });
+
+  it("creates basic page-load checks when Gemini remains temporarily unavailable", async () => {
+    const { generateSiteTestCases } = await import("../services/generator");
+    const siteData = {
+      baseUrl: "https://example.test",
+      isLoggedIn: true,
+      loginSteps: [
+        "fill #email | {{STOCKFLOW_TEST_EMAIL}}",
+        "fill #password | {{STOCKFLOW_TEST_PASSWORD}}",
+        "click #login",
+      ],
+      pages: [
+        {
+          url: "https://example.test/inventory",
+          path: "/inventory",
+          title: "Inventory",
+          headings: ["Inventory Overview"],
+          text: "Inventory Overview\nAvailable products",
+          elements: [{ tag: "button", text: "Filter", selector: "#filter" }],
+        },
+      ],
+    };
+    mocked.error = new Error("503 service unavailable");
+    vi.useFakeTimers();
+
+    try {
+      const resultPromise = generateSiteTestCases(siteData);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(result.generation_mode).toBe("fallback");
+      expect(result.testCases).toHaveLength(1);
+      expect(result.testCases[0].title).toBe("Verify /inventory displays Inventory Overview");
+      expect(result.testCases[0].steps).toEqual([
+        ...siteData.loginSteps,
+        "goto /inventory",
+        "expect text Inventory Overview",
+      ]);
+      expect(result.testCases[0].description).toContain("temporarily unavailable");
+      expect(result.skipped_invalid).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects generic assertions such as the app name StockFlow", async () => {
@@ -246,4 +296,3 @@ describe("generated test case validation", () => {
     expect(skipped_duplicate).toBe(2);
   });
 });
-
