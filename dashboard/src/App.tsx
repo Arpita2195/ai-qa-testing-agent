@@ -329,11 +329,15 @@ interface Run {
 
 interface BugReport {
   id: string;
+  result_id?: string | null;
+  api_result_id?: string | null;
   title: string;
+  description?: string | null;
   severity: string;
   classification: string;
   probable_cause: string;
   status: string;
+  source?: "web" | "api";
 }
 
 interface EvidenceSummary {
@@ -5002,16 +5006,16 @@ function BugReportsPage() {
       {(data ?? []).length === 0 ? (
         <div className="empty-state">
           <h2>No bug reports yet</h2>
-          <p>Bug reports are created from failed web-test results after failure analysis. Passing tests do not create reports.</p>
+          <p>Failed API checks appear here automatically. Failed web tests appear after failure analysis; passing tests do not create reports.</p>
           <ol>
-            <li>Open a project and run its approved test cases.</li>
-            <li>When a web test fails, open that run and select <strong>Analyze failures</strong>.</li>
-            <li>Review the generated report here, then confirm or dismiss it.</li>
+            <li>Run approved API checks; failed checks are added here automatically.</li>
+            <li>For failed web tests, open the run and select <strong>Analyze failures</strong>.</li>
+            <li>Review reports here, then confirm or dismiss them.</li>
           </ol>
           <Link className="button-link" to="/projects">Open projects</Link>
         </div>
       ) : (data ?? []).map((report) => <article className="row-card" key={report.id}>
-          <div><strong>{report.title}</strong><p>{report.classification} · {report.severity}</p><p>{report.probable_cause}</p><span className={`badge ${report.status}`}>{report.status}</span></div>
+          <div><strong>{report.title}</strong><p>{report.source === "api" ? "API check" : "Web test"} · {report.classification} · {report.severity}</p><p>{report.description || report.probable_cause}</p><span className={`badge ${report.status}`}>{report.status}</span></div>
           <div className="actions"><button onClick={() => setStatus(report.id, "confirmed")}>Confirm</button><button className="secondary" onClick={() => setStatus(report.id, "dismissed")}>Dismiss</button></div>
         </article>)}
     </State>

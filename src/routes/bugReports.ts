@@ -36,12 +36,14 @@ interface FailureRow {
 
 interface BugReportRow {
   id: string;
-  result_id: string;
+  result_id: string | null;
+  api_result_id?: string | null;
   title: string;
   description: string | null;
   severity: string | null;
   created_at: Date;
   test_case_title?: string;
+  source?: "web" | "api";
 }
 
 async function loadFailure(resultId: string): Promise<FailureRow | undefined> {
@@ -191,22 +193,26 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   fastify.get("/bug-reports", async (request) => {
-    let query: string;
-    let queryParams: any[] = [];
-    if (request.user && request.user.role !== "admin" && !request.user.isServiceAccount) {
-      query = `SELECT br.*, tc.title AS test_case_title
-               FROM bug_reports br
-               JOIN test_cases tc ON tc.id = br.test_case_id
-               JOIN project_members pm ON pm.project_id = tc.project_id AND pm.user_id = $1
-               ORDER BY br.created_at DESC`;
-      queryParams = [request.user.id];
-    } else {
-      query = `SELECT br.*, tc.title AS test_case_title
-               FROM bug_reports br
-               LEFT JOIN test_cases tc ON tc.id = br.test_case_id
-               ORDER BY br.created_at DESC`;
-    }
-    const reports = await pool.query<BugReportRow>(query, queryParams);
+    const userId = request.user?.id;
+    const isProjectScopedUser = Boolean(request.user &&
+      request.user.role !== "admin" &&
+      !request.user.isServiceAccount);
+    const reports = await pool.query<BugReportRow>(
+      `SELECT br.*, COALESCE(tc.title, ae.name) AS test_case_title,
+              CASE WHEN br.api_result_id IS NULL THEN 'web' ELSE 'api' END AS source
+       FROM bug_reports br
+       LEFT JOIN test_cases tc ON tc.id = br.test_case_id
+       LEFT JOIN api_test_results ar ON ar.id = br.api_result_id
+       LEFT JOIN api_endpoints ae ON ae.id = ar.endpoint_id
+       LEFT JOIN test_results tr ON tr.id = br.result_id
+       LEFT JOIN test_runs web_run ON web_run.id = tr.run_id
+       LEFT JOIN test_runs api_run ON api_run.id = ar.run_id
+       ${isProjectScopedUser
+         ? "WHERE EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = COALESCE(tc.project_id, web_run.project_id, api_run.project_id) AND pm.user_id = $1)"
+         : ""}
+       ORDER BY br.created_at DESC`,
+      isProjectScopedUser && userId ? [userId] : [],
+    );
     return reports.rows;
   });
 
@@ -217,9 +223,15 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const report = await pool.query<BugReportRow & { project_id: string }>(
-      `SELECT br.*, tc.title AS test_case_title, tc.project_id
+      `SELECT br.*, COALESCE(tc.title, ae.name) AS test_case_title,
+              COALESCE(tc.project_id, web_run.project_id, api_run.project_id) AS project_id
        FROM bug_reports br
        LEFT JOIN test_cases tc ON tc.id = br.test_case_id
+       LEFT JOIN api_test_results ar ON ar.id = br.api_result_id
+       LEFT JOIN api_endpoints ae ON ae.id = ar.endpoint_id
+       LEFT JOIN test_results tr ON tr.id = br.result_id
+       LEFT JOIN test_runs web_run ON web_run.id = tr.run_id
+       LEFT JOIN test_runs api_run ON api_run.id = ar.run_id
        WHERE br.id = $1`,
       [params.data.id],
     );
@@ -248,8 +260,13 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const reportCheck = await pool.query<{ project_id: string }>(
-        `SELECT tc.project_id FROM bug_reports br
-         JOIN test_cases tc ON tc.id = br.test_case_id
+        `SELECT COALESCE(tc.project_id, web_run.project_id, api_run.project_id) AS project_id
+         FROM bug_reports br
+         LEFT JOIN test_cases tc ON tc.id = br.test_case_id
+         LEFT JOIN api_test_results ar ON ar.id = br.api_result_id
+         LEFT JOIN test_results tr ON tr.id = br.result_id
+         LEFT JOIN test_runs web_run ON web_run.id = tr.run_id
+         LEFT JOIN test_runs api_run ON api_run.id = ar.run_id
          WHERE br.id = $1`,
         [params.data.id],
       );
