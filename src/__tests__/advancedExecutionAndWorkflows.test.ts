@@ -11,7 +11,7 @@ import {
   runWebTestWithRetries,
   runApiTestWithRetries,
 } from "../services/executionManager";
-import { computeNextRunDate } from "../services/scheduler";
+import { computeNextRunDate, executeScheduledSuite } from "../services/scheduler";
 import { validateAutomationInstructions } from "../services/automationConverter";
 import { scheduleRoutes } from "../routes/schedules";
 import runEvidenceRoutes from "../routes/runEvidence";
@@ -378,6 +378,42 @@ describe("TASK 8: Advanced Test Execution & Workflow Management", () => {
         reply.code((error as any).statusCode || 500).send({ error: error.message });
       });
       app.register(scheduleRoutes);
+    });
+
+    it("creates scheduled test runs with an explicit UUID", async () => {
+      const scheduleId = "00000000-0000-4000-8000-000000000003";
+      const schedule = {
+        id: scheduleId,
+        project_id: "00000000-0000-4000-8000-000000000001",
+        suite_id: "00000000-0000-4000-8000-000000000002",
+        name: "Daily inventory",
+        schedule_type: "daily",
+        cron_expression: null,
+        concurrency: 3,
+        retries: 1,
+        is_active: true,
+      };
+      const scheduleRunId = "00000000-0000-4000-8000-000000000004";
+      const query = vi.spyOn(pool, "query")
+        .mockResolvedValueOnce({ rows: [schedule], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [{ name: null, base_url: "https://example.com" }], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [{ id: scheduleRunId }], rowCount: 1 } as never)
+        .mockImplementationOnce(async (_sql, params) => ({
+          rows: [{ id: params?.[0] }],
+          rowCount: 1,
+        }) as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never);
+
+      const result = await executeScheduledSuite(scheduleId);
+
+      expect(result).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+      expect(query.mock.calls[3][0]).toContain("INSERT INTO test_runs (id,");
+      expect(query.mock.calls[3][1]?.[0]).toBe(result);
+      query.mockRestore();
     });
 
     it("creates a schedule using the API schedule_type contract", async () => {

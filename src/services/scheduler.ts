@@ -139,14 +139,15 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
   const scheduleRunId = scheduleRunRes.rows[0].id;
 
   // Create test run record
+  const runId = randomUUID();
   const runRes = await pool.query<{ id: string }>(
-    `INSERT INTO test_runs (project_id, suite_id, run_type, status, concurrency, retries, started_at)
-     VALUES ($1, $2, 'suite', 'running', $3, $4, now()) RETURNING id`,
-    [schedule.project_id, schedule.suite_id, schedule.concurrency, schedule.retries],
+    `INSERT INTO test_runs (id, project_id, suite_id, run_type, status, concurrency, retries, started_at)
+     VALUES ($1, $2, $3, 'suite', 'running', $4, $5, now()) RETURNING id`,
+    [runId, schedule.project_id, schedule.suite_id, schedule.concurrency, schedule.retries],
   );
-  const runId = runRes.rows[0].id;
+  const createdRunId = runRes.rows[0].id;
 
-  await pool.query(`UPDATE test_schedule_runs SET run_id = $1 WHERE id = $2`, [runId, scheduleRunId]);
+  await pool.query(`UPDATE test_schedule_runs SET run_id = $1 WHERE id = $2`, [createdRunId, scheduleRunId]);
 
   try {
     // Fetch suite members
@@ -195,7 +196,7 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
           const execution: ExtendedWebExecutionResult = await runWebTestWithRetries(
             project.base_url,
             member.steps,
-            { runId, resultId },
+            { runId: createdRunId, resultId },
             { projectId: schedule.project_id, retries: schedule.retries },
           );
 
@@ -213,7 +214,7 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
             [
               resultId,
-              runId,
+              createdRunId,
               member.test_case_id,
               execution.status,
               execution.errorMessage ? redactSecrets(execution.errorMessage) : null,
@@ -264,7 +265,7 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
                (run_id, endpoint_id, status, actual_status, response_ms, error_message, response_snippet, retry_count, flaky, attempts, step_results)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
             [
-              runId,
+              createdRunId,
               member.endpoint_id,
               execution.status,
               execution.actualStatus,
@@ -290,7 +291,7 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
        SET status = $1, finished_at = now(),
            flaky_count = $2, inconclusive_count = $3, skipped_count = $4, total_count = $5
        WHERE id = $6`,
-      [overallStatus, flakyCount, inconclusiveCount, skippedCount, members.length, runId],
+      [overallStatus, flakyCount, inconclusiveCount, skippedCount, members.length, createdRunId],
     );
 
     const summary = {
@@ -320,7 +321,7 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
 
     if (project.name) {
       await writeRunReport({
-        runId,
+        runId: createdRunId,
         projectName: project.name,
         baseUrl: project.base_url,
         startedAt: new Date().toISOString(),
@@ -329,7 +330,7 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
       });
     }
 
-    return runId;
+    return createdRunId;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     await pool.query(
