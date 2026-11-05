@@ -249,7 +249,7 @@ export async function executeScheduledSuite(scheduleId: string): Promise<string 
               expected_fields: member.expected_fields ?? {},
               max_response_ms: member.max_response_ms,
             },
-            { retries: schedule.retries },
+            { retries: schedule.retries, projectId: schedule.project_id },
           );
 
           executionStatuses.push(execution.status);

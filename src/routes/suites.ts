@@ -389,7 +389,7 @@ const suiteRoutes: FastifyPluginAsync = async (fastify) => {
               expected_fields: member.expected_fields ?? {},
               max_response_ms: member.max_response_ms,
             },
-            { retries },
+            { retries, projectId: suite.project_id },
           );
 
           if (execution.flaky) flakyCount++;

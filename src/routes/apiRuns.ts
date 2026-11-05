@@ -2,12 +2,12 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import {
-  createApiProjectAuthState,
-  runApiTestWithProjectAuth,
   classifyRunStatus,
+  createApiProjectAuthState,
   type ApiEndpoint,
   type ApiTestResult,
 } from "../services/apiRunner";
+import { runApiTestWithRetries } from "../services/executionManager";
 import { assertProjectAccess } from "../services/authService";
 
 const projectParamsSchema = z.object({ projectId: z.string().uuid() });
@@ -82,16 +82,16 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
       const results: Array<ApiResultRow & { name: string }> = [];
       const authState = createApiProjectAuthState();
       for (const endpoint of endpoints.rows) {
-        const execution = await runApiTestWithProjectAuth(
+        const execution = await runApiTestWithRetries(
           project.base_url,
-          project.id,
           endpoint,
-          authState,
+          { retries: 1, projectId: project.id, authState },
         );
         const result = await pool.query<ApiResultRow>(
           `INSERT INTO api_test_results
-             (run_id, endpoint_id, status, actual_status, response_ms, error_message, response_snippet)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+             (run_id, endpoint_id, status, actual_status, response_ms, error_message, response_snippet,
+              retry_count, flaky, attempts, step_results)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
           [
             run.id,
             endpoint.id,
@@ -100,6 +100,10 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
             execution.responseMs,
             execution.errorMessage,
             execution.responseSnippet,
+            execution.retryCount,
+            execution.flaky,
+            JSON.stringify(execution.attempts),
+            JSON.stringify(execution.stepResults ?? []),
           ],
         );
         if (!result.rows[0]) {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../../config/db";
 import { classifyRunStatus, redactSecrets, scrubEvidence } from "../runner";
+import { createApiProjectAuthState } from "../apiRunner";
 import {
   executeConcurrentPool,
   runWebTestWithRetries,
@@ -206,9 +207,10 @@ export function initializeJobHandlers(): void {
 
     const endpoints = endpointsRes.rows;
     const results: any[] = [];
+    const authState = createApiProjectAuthState();
 
     for (const endpoint of endpoints) {
-      const execution = await runApiTestWithRetries(project.base_url, endpoint, { retries });
+      const execution = await runApiTestWithRetries(project.base_url, endpoint, { retries, projectId, authState });
       inMemoryMetrics.trackTestExecution({
         status: execution.status as any,
         durationMs: execution.responseMs,

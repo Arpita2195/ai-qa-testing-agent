@@ -208,6 +208,7 @@ describe("regressionService", () => {
   describe("detectFlakyTests", () => {
     it("identifies tests that flip between passed and failed and computes score", async () => {
       const projectId = "p-1";
+      let apiFlakinessQuery = "";
 
       vi.mocked(pool.query).mockImplementation(async (sql: string) => {
         if (sql.includes("FROM test_results tr")) {
@@ -241,6 +242,7 @@ describe("regressionService", () => {
         }
 
         if (sql.includes("FROM api_test_results ar")) {
+          apiFlakinessQuery = sql;
           return {
             rowCount: 0,
             rows: [],
@@ -261,6 +263,8 @@ describe("regressionService", () => {
       // Flakiness score: 2 * min(8, 2) / 10 = 0.4
       expect(flakyList[1].id).toBe("tc-flaky-2");
       expect(flakyList[1].flakiness_score).toBe(0.4);
+      expect(apiFlakinessQuery).toContain("ar.actual_status >= 400");
+      expect(apiFlakinessQuery).toContain("ar.actual_status < 500");
     });
   });
 

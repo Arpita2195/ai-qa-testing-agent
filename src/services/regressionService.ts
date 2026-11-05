@@ -356,6 +356,11 @@ export async function detectFlakyTests(
        FROM api_test_results ar
        JOIN api_endpoints ae ON ae.id = ar.endpoint_id
        JOIN recent_runs rr ON rr.id = ar.run_id
+       WHERE NOT (
+         ar.status = 'failed'
+         AND ar.actual_status >= 400
+         AND ar.actual_status < 500
+       )
        GROUP BY ar.endpoint_id, ae.name
        HAVING COUNT(ar.id) >= 2
      )

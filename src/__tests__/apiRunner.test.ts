@@ -19,6 +19,7 @@ import {
   isNetworkOrInfrastructureError,
   type ApiEndpoint,
 } from "../services/apiRunner";
+import { runApiTestWithRetries } from "../services/executionManager";
 
 const endpoint: ApiEndpoint = {
   method: "GET",
@@ -167,6 +168,49 @@ describe("runApiTest infrastructure and network error handling", () => {
 });
 
 describe("runApiTestWithProjectAuth", () => {
+  it("uses project authentication and retries transient failures consistently", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = String(input);
+      if (requestUrl.endsWith("/api/auth/login")) {
+        return Response.json({ token: "test-bearer-token" });
+      }
+      if (!new Headers(init?.headers).has("authorization")) {
+        return Response.json({ message: "Unauthorized" }, { status: 401 });
+      }
+      if (fetchMock.mock.calls.filter(([url]) => !String(url).endsWith("/api/auth/login")).length === 2) {
+        return Response.json({ message: "Temporary failure" }, { status: 500 });
+      }
+      return Response.json([{ id: 1 }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runApiTestWithRetries(
+      "https://example.test",
+      endpoint,
+      { retries: 1, backoffMs: 1, projectId: "project-id" },
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.flaky).toBe(true);
+    expect(result.retryCount).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not waste retries on deterministic 4xx failures", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ message: "Not found" }, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runApiTestWithRetries(
+      "https://example.test",
+      endpoint,
+      { retries: 3, backoffMs: 1 },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.retryCount).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("logs in with saved project credentials and retries an unauthorized endpoint", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const requestUrl = String(input);

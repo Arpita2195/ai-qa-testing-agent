@@ -1,5 +1,13 @@
 import { runTestCase, type TestCaseRunResult, type WebResultStatus, redactSecrets } from "./runner";
-import { runApiTest, type ApiEndpoint, type ApiTestResult, isNetworkOrInfrastructureError } from "./apiRunner";
+import {
+  createApiProjectAuthState,
+  runApiTest,
+  runApiTestWithProjectAuth,
+  type ApiEndpoint,
+  type ApiProjectAuthState,
+  type ApiTestResult,
+  isNetworkOrInfrastructureError,
+} from "./apiRunner";
 import { runMobileTestCase, type MobileRunnerOptions } from "./mobileRunner";
 import { type MobileTestCaseRunResult } from "./mobile/types";
 
@@ -28,6 +36,11 @@ export interface ExtendedMobileExecutionResult extends MobileTestCaseRunResult {
   flaky: boolean;
   retryCount: number;
   attempts: ExecutionAttempt[];
+}
+
+function shouldRetryApiFailure(result: ApiTestResult): boolean {
+  if (result.status === "inconclusive" || result.actualStatus === null) return true;
+  return [408, 425, 429].includes(result.actualStatus) || result.actualStatus >= 500;
 }
 
 function classifyErrorType(errorMessage: string | null, isInconclusive: boolean): ExecutionAttempt["errorType"] {
@@ -107,9 +120,14 @@ export async function runApiTestWithRetries(
     retries?: number;
     backoffMs?: number;
     runner?: typeof runApiTest;
+    projectId?: string;
+    authState?: ApiProjectAuthState;
   },
 ): Promise<ExtendedApiExecutionResult> {
   const runner = options?.runner ?? runApiTest;
+  const authState = options?.projectId
+    ? options.authState ?? createApiProjectAuthState()
+    : null;
   const maxRetries = Math.min(Math.max(options?.retries ?? 0, 0), 5);
   const backoffMs = options?.backoffMs ?? 200;
   const attempts: ExecutionAttempt[] = [];
@@ -119,7 +137,9 @@ export async function runApiTestWithRetries(
   let hasFailed = false;
 
   for (let attempt = 1; attempt <= 1 + maxRetries; attempt++) {
-    const result = await runner(baseUrl, endpoint);
+    const result = authState && options?.projectId
+      ? await runApiTestWithProjectAuth(baseUrl, options.projectId, endpoint, authState)
+      : await runner(baseUrl, endpoint);
     lastResult = result;
 
     const errorType = classifyErrorType(result.errorMessage, result.status === "inconclusive");
@@ -136,8 +156,10 @@ export async function runApiTestWithRetries(
       break;
     } else {
       hasFailed = true;
-      if (attempt <= maxRetries && backoffMs > 0) {
+      if (attempt <= maxRetries && shouldRetryApiFailure(result) && backoffMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      } else {
+        break;
       }
     }
   }
