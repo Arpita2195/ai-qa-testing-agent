@@ -819,17 +819,23 @@ export async function safeFetch(
           host: parsedUrl.host,
         },
         // Pin the connection to the validated IP; prevents DNS rebinding
-        lookup: (_hostname, _options, callback) => {
+        lookup: (_hostname, lookupOptions, callback) => {
+          const returnsAllAddresses =
+            typeof lookupOptions === "object" &&
+            lookupOptions !== null &&
+            "all" in lookupOptions &&
+            lookupOptions.all;
           if (!allowPrivateTargets && isIpPrivateOrRestricted(pinnedIp)) {
-            return callback(
-              new SecurityError(
-                "Target URL is prohibited: address is private, loopback, or restricted.",
-              ),
-              "",
-              pinnedFamily,
+            const error = new SecurityError(
+              "Target URL is prohibited: address is private, loopback, or restricted.",
             );
+            return returnsAllAddresses
+              ? callback(error, [])
+              : callback(error, "", pinnedFamily);
           }
-          callback(null, pinnedIp, pinnedFamily);
+          return returnsAllAddresses
+            ? callback(null, [{ address: pinnedIp, family: pinnedFamily }])
+            : callback(null, pinnedIp, pinnedFamily);
         },
       };
 

@@ -1,6 +1,7 @@
 import http from "node:http";
+import dns from "node:dns/promises";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   assertTargetUrlAllowed,
   isCloudMetadataTarget,
@@ -307,6 +308,24 @@ describe("safeFetch: redirects, timeout, size limits, and DNS rebinding defense"
     const json = await res.json<{ status: string; message: string }>();
     expect(json.status).toBe("success");
     expect(json.message).toBe("Hello safe world");
+  });
+
+  it("supports all-address DNS lookups while pinning hostname requests", async () => {
+    const lookup = vi
+      .spyOn(dns, "lookup")
+      .mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
+
+    try {
+      const response = await safeFetch(`http://api.example.test:${serverPort}/ok`, {
+        allowPrivateTargets: true,
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json<{ status: string }>()).toMatchObject({ status: "success" });
+      expect(lookup).toHaveBeenCalled();
+    } finally {
+      lookup.mockRestore();
+    }
   });
 
   it("blocks requests to private destinations when allowPrivateTargets=false", async () => {
