@@ -2,7 +2,8 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import {
-  runApiTest,
+  createApiProjectAuthState,
+  runApiTestWithProjectAuth,
   classifyRunStatus,
   type ApiEndpoint,
   type ApiTestResult,
@@ -79,8 +80,14 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
         [project.id],
       );
       const results: Array<ApiResultRow & { name: string }> = [];
+      const authState = createApiProjectAuthState();
       for (const endpoint of endpoints.rows) {
-        const execution = await runApiTest(project.base_url, endpoint);
+        const execution = await runApiTestWithProjectAuth(
+          project.base_url,
+          project.id,
+          endpoint,
+          authState,
+        );
         const result = await pool.query<ApiResultRow>(
           `INSERT INTO api_test_results
              (run_id, endpoint_id, status, actual_status, response_ms, error_message, response_snippet)

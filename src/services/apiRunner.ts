@@ -1,5 +1,6 @@
 import { classifyRunStatus } from "./runner";
 import { assertTargetUrlAllowed, safeFetch, SecurityError, type SafeFetchResponse } from "./urlGuard";
+import { getProjectAccess } from "./secretStore";
 
 export type ApiMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export type ExpectedFieldType = "string" | "number" | "boolean" | "object" | "array";
@@ -65,6 +66,112 @@ export interface ApiTestResult {
   responseSnippet: string;
   stepResults?: ApiStepExecutionResult[];
   extractedContext?: Record<string, unknown>;
+}
+
+export interface ApiProjectAuthState {
+  authorizationHeader: string | null;
+  authenticationAttempted: boolean;
+  authenticationError: string | null;
+}
+
+export function createApiProjectAuthState(): ApiProjectAuthState {
+  return {
+    authorizationHeader: null,
+    authenticationAttempted: false,
+    authenticationError: null,
+  };
+}
+
+async function authenticateProjectApi(
+  baseUrl: string,
+  projectId: string,
+): Promise<{ authorizationHeader: string | null; error: string | null }> {
+  const credentials = await getProjectAccess(projectId);
+  if (!credentials?.username || !credentials.password) {
+    return { authorizationHeader: null, error: "No saved project test credentials are available." };
+  }
+
+  try {
+    const response = await safeFetch(new URL("/api/auth/login", baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: credentials.username, password: credentials.password }),
+      timeoutMs: 10_000,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      return {
+        authorizationHeader: null,
+        error: `The API login endpoint returned HTTP ${response.status}.`,
+      };
+    }
+
+    let responseBody: unknown;
+    try {
+      responseBody = await response.json();
+    } catch {
+      return { authorizationHeader: null, error: "The API login endpoint did not return valid JSON." };
+    }
+
+    const token =
+      typeof responseBody === "object" &&
+      responseBody !== null &&
+      "token" in responseBody &&
+      typeof responseBody.token === "string"
+        ? responseBody.token
+        : "";
+    if (!token) {
+      return { authorizationHeader: null, error: "The API login response did not contain a bearer token." };
+    }
+
+    return { authorizationHeader: `Bearer ${token}`, error: null };
+  } catch (error) {
+    return {
+      authorizationHeader: null,
+      error: `API login request failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+export async function runApiTestWithProjectAuth(
+  baseUrl: string,
+  projectId: string,
+  endpoint: ApiEndpoint,
+  authState: ApiProjectAuthState,
+): Promise<ApiTestResult> {
+  const run = (authorizationHeader: string | null) =>
+    runApiTest(baseUrl, {
+      ...endpoint,
+      headers: authorizationHeader
+        ? { ...endpoint.headers, authorization: authorizationHeader }
+        : endpoint.headers,
+    });
+
+  if (authState.authorizationHeader && endpoint.expected_status !== 401) {
+    return run(authState.authorizationHeader);
+  }
+
+  const result = await runApiTest(baseUrl, endpoint);
+  if (result.actualStatus !== 401 || endpoint.expected_status === 401) {
+    return result;
+  }
+
+  if (!authState.authenticationAttempted) {
+    authState.authenticationAttempted = true;
+    const authentication = await authenticateProjectApi(baseUrl, projectId);
+    authState.authorizationHeader = authentication.authorizationHeader;
+    authState.authenticationError = authentication.error;
+  }
+
+  if (!authState.authorizationHeader) {
+    return authState.authenticationError
+      ? {
+          ...result,
+          errorMessage: `${result.errorMessage}. API authentication failed: ${authState.authenticationError}`,
+        }
+      : result;
+  }
+
+  return run(authState.authorizationHeader);
 }
 
 export function isNetworkOrInfrastructureError(error: unknown): boolean {
@@ -421,4 +528,3 @@ export async function runApiTest(
     clearTimeout(timeout);
   }
 }
-

@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const mockedProjectAccess = vi.hoisted(() => ({
+  value: { username: "qa@example.test", password: "test-password" } as
+    | { username: string; password: string }
+    | null,
+}));
+
+vi.mock("../services/secretStore", () => ({
+  getProjectAccess: vi.fn(async () => mockedProjectAccess.value),
+}));
+
 import {
+  createApiProjectAuthState,
   runApiTest,
+  runApiTestWithProjectAuth,
   classifyRunStatus,
   classifyApiRunStatus,
   isNetworkOrInfrastructureError,
@@ -19,6 +32,7 @@ const endpoint: ApiEndpoint = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  mockedProjectAccess.value = { username: "qa@example.test", password: "test-password" };
 });
 
 describe("runApiTest assertions", () => {
@@ -152,6 +166,59 @@ describe("runApiTest infrastructure and network error handling", () => {
   });
 });
 
+describe("runApiTestWithProjectAuth", () => {
+  it("logs in with saved project credentials and retries an unauthorized endpoint", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = String(input);
+      if (requestUrl.endsWith("/api/auth/login")) {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          email: "qa@example.test",
+          password: "test-password",
+        });
+        return Response.json({ token: "test-bearer-token" });
+      }
+
+      if (new Headers(init?.headers).has("authorization")) {
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-bearer-token");
+        return Response.json([{ id: 1 }]);
+      }
+
+      return Response.json({ message: "Not authorized, no token" }, { status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const authState = createApiProjectAuthState();
+
+    const result = await runApiTestWithProjectAuth(
+      "https://example.test",
+      "project-id",
+      endpoint,
+      authState,
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.actualStatus).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(authState.authorizationHeader).toBe("Bearer test-bearer-token");
+    expect(authState.authenticationAttempted).toBe(true);
+  });
+
+  it("does not authenticate endpoints explicitly expecting an unauthorized response", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ message: "Unauthorized" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runApiTestWithProjectAuth(
+      "https://example.test",
+      "project-id",
+      { ...endpoint, expected_status: 401 },
+      createApiProjectAuthState(),
+    );
+
+    expect(result.status).toBe("passed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("overall API and run status calculation", () => {
   it("never classifies empty results as passed", () => {
     expect(classifyRunStatus([])).toBe("inconclusive");
@@ -182,4 +249,3 @@ describe("overall API and run status calculation", () => {
     expect(classifyRunStatus(["inconclusive"])).toBe("inconclusive");
   });
 });
-

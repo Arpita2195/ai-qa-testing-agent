@@ -89,7 +89,7 @@ AI output is a starting point: incorrect selectors, wrong assumptions, missing t
 
 ### API Endpoints
 
-Add a simple endpoint or import an OpenAPI JSON/YAML specification. Imported operations are pending and should be reviewed before approval. An endpoint contains the HTTP method/path and assertions such as expected status, expected response fields, or response-time limit. **Run approved** executes approved endpoints relative to the project’s base URL and saves an API run with per-endpoint results.
+Add a simple endpoint or import an OpenAPI JSON/YAML specification. Imported operations are pending and should be reviewed before approval. An endpoint contains the HTTP method/path and assertions such as expected status, expected response fields, or response-time limit. **Run approved** executes approved endpoints relative to the project’s base URL and saves an API run with per-endpoint results. If an endpoint returns 401 when a successful response is expected, the runner can use saved project credentials with the conventional `/api/auth/login` endpoint, then retry with a temporary bearer token. The token is only held in memory during that run and is not saved with endpoint or result data. Targets using another login contract need an adapter before they can use this behavior.
 
 Endpoint runs send real HTTP requests to the configured target. POST/PUT/PATCH/DELETE may modify data; use safe test fixtures and a disposable environment.
 
