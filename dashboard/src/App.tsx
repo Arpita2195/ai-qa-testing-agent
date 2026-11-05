@@ -137,8 +137,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method || "GET").toUpperCase();
   const isMutating = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
   const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
+  const hasBody = init?.body !== undefined && init.body !== null;
   const headers: Record<string, string> = {
-    ...(isFormData ? {} : { "Content-Type": "application/json" }),
+    ...(hasBody && !isFormData ? { "Content-Type": "application/json" } : {}),
     ...(init?.headers as Record<string, string>),
   };
 
@@ -3777,7 +3778,7 @@ function SchedulesTab({ projectId }: { projectId: string }) {
       const res = await api<any>(`/schedules/${schedule.id}/run-now`, {
         method: "POST",
       });
-      setMessage(`Schedule execution started for "${schedule.name}". Suite run #${res.run_id?.slice(0, 8)} created.`);
+      setMessage(`Schedule execution started for "${schedule.name}". Suite run #${res.runId?.slice(0, 8)} created.`);
       reload();
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
