@@ -259,7 +259,7 @@ export interface TestSchedule {
   suite_id: string;
   suite_name?: string;
   name: string;
-  frequency: "hourly" | "daily" | "weekly" | "cron";
+  schedule_type: "hourly" | "daily" | "weekly" | "custom_cron";
   cron_expression?: string | null;
   concurrency: number;
   retries: number;
@@ -3734,7 +3734,7 @@ function SchedulesTab({ projectId }: { projectId: string }) {
         body: JSON.stringify({
           name: name.trim(),
           suite_id: suiteId,
-          frequency,
+          schedule_type: frequency === "cron" ? "custom_cron" : frequency,
           cron_expression: frequency === "cron" ? cronExpression.trim() : null,
           concurrency,
           retries,
@@ -3807,7 +3807,7 @@ function SchedulesTab({ projectId }: { projectId: string }) {
     setEditingSchedule(schedule);
     setEditName(schedule.name);
     setEditSuiteId(schedule.suite_id);
-    setEditFrequency(schedule.frequency);
+    setEditFrequency(schedule.schedule_type === "custom_cron" ? "cron" : schedule.schedule_type);
     setEditCronExpression(schedule.cron_expression || "0 2 * * *");
     setEditConcurrency(schedule.concurrency || 3);
     setEditRetries(schedule.retries ?? 1);
@@ -3825,7 +3825,7 @@ function SchedulesTab({ projectId }: { projectId: string }) {
         body: JSON.stringify({
           name: editName.trim(),
           suite_id: editSuiteId,
-          frequency: editFrequency,
+          schedule_type: editFrequency === "cron" ? "custom_cron" : editFrequency,
           cron_expression: editFrequency === "cron" ? editCronExpression.trim() : null,
           concurrency: editConcurrency,
           retries: editRetries,
@@ -4018,8 +4018,8 @@ function SchedulesTab({ projectId }: { projectId: string }) {
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
                   <strong style={{ fontSize: "1.1rem", color: "#17324d" }}>{schedule.name}</strong>
-                  <span className={`badge-freq badge-freq-${schedule.frequency}`}>
-                    {schedule.frequency === "cron" ? `Cron: ${schedule.cron_expression}` : schedule.frequency}
+                  <span className={`badge-freq badge-freq-${schedule.schedule_type === "custom_cron" ? "cron" : schedule.schedule_type}`}>
+                    {schedule.schedule_type === "custom_cron" ? `Cron: ${schedule.cron_expression}` : schedule.schedule_type}
                   </span>
                   <span className={`badge ${schedule.is_active ? "approved" : "rejected"}`}>
                     {schedule.is_active ? "Active" : "Paused"}

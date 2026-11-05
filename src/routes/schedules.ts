@@ -12,7 +12,7 @@ const createScheduleSchema = z.object({
   name: z.string().min(1).max(255),
   suite_id: z.string().uuid(),
   schedule_type: z.enum(["hourly", "daily", "weekly", "custom_cron"]),
-  cron_expression: z.string().optional(),
+  cron_expression: z.string().nullable().optional(),
   concurrency: z.number().int().min(1).max(10).default(2),
   retries: z.number().int().min(0).max(5).default(1),
   is_active: z.boolean().default(true),
@@ -22,7 +22,7 @@ const updateScheduleSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   suite_id: z.string().uuid().optional(),
   schedule_type: z.enum(["hourly", "daily", "weekly", "custom_cron"]).optional(),
-  cron_expression: z.string().optional(),
+  cron_expression: z.string().nullable().optional(),
   concurrency: z.number().int().min(1).max(10).optional(),
   retries: z.number().int().min(0).max(5).optional(),
   is_active: z.boolean().optional(),
@@ -67,7 +67,7 @@ export const scheduleRoutes: FastifyPluginAsync = async (fastify) => {
           body.data.suite_id,
           body.data.name,
           body.data.schedule_type,
-          body.data.cron_expression ?? null,
+          body.data.schedule_type === "custom_cron" ? body.data.cron_expression ?? null : null,
           body.data.concurrency,
           body.data.retries,
           body.data.is_active,
@@ -168,7 +168,11 @@ export const scheduleRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const newType = body.data.schedule_type ?? existing.schedule_type;
-    const newCron = body.data.cron_expression !== undefined ? body.data.cron_expression : existing.cron_expression;
+    const newCron = body.data.cron_expression !== undefined
+      ? body.data.cron_expression
+      : body.data.schedule_type !== undefined && body.data.schedule_type !== "custom_cron"
+        ? null
+        : existing.cron_expression;
     let nextRunAt = existing.next_run_at;
 
     if (body.data.schedule_type !== undefined || body.data.cron_expression !== undefined) {
@@ -180,7 +184,7 @@ export const scheduleRoutes: FastifyPluginAsync = async (fastify) => {
        SET name = COALESCE($1, name),
            suite_id = COALESCE($2, suite_id),
            schedule_type = COALESCE($3, schedule_type),
-           cron_expression = COALESCE($4, cron_expression),
+           cron_expression = $4,
            concurrency = COALESCE($5, concurrency),
            retries = COALESCE($6, retries),
            is_active = COALESCE($7, is_active),
@@ -192,7 +196,7 @@ export const scheduleRoutes: FastifyPluginAsync = async (fastify) => {
         body.data.name ?? null,
         body.data.suite_id ?? null,
         body.data.schedule_type ?? null,
-        body.data.cron_expression !== undefined ? body.data.cron_expression : null,
+        newCron,
         body.data.concurrency ?? null,
         body.data.retries ?? null,
         body.data.is_active !== undefined ? body.data.is_active : null,

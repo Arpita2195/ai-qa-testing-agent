@@ -380,6 +380,69 @@ describe("TASK 8: Advanced Test Execution & Workflow Management", () => {
       app.register(scheduleRoutes);
     });
 
+    it("creates a schedule using the API schedule_type contract", async () => {
+      const suiteId = "00000000-0000-4000-8000-000000000002";
+      const schedule = {
+        id: "00000000-0000-4000-8000-000000000003",
+        project_id: "00000000-0000-4000-8000-000000000001",
+        suite_id: suiteId,
+        name: "Daily inventory",
+        schedule_type: "daily",
+      };
+      const query = vi.spyOn(pool, "query")
+        .mockResolvedValueOnce({ rows: [{ id: suiteId }], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [schedule], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/projects/00000000-0000-4000-8000-000000000001/schedules",
+        payload: {
+          name: schedule.name,
+          suite_id: suiteId,
+          schedule_type: "daily",
+          cron_expression: null,
+          concurrency: 3,
+          retries: 1,
+          is_active: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({ name: schedule.name, schedule_type: "daily" });
+      expect(query.mock.calls[1][1]?.[4]).toBeNull();
+      query.mockRestore();
+    });
+
+    it("clears cron_expression when a custom schedule is changed to a recurring frequency", async () => {
+      const scheduleId = "00000000-0000-4000-8000-000000000003";
+      const existing = {
+        id: scheduleId,
+        project_id: "00000000-0000-4000-8000-000000000001",
+        suite_id: "00000000-0000-4000-8000-000000000002",
+        name: "Daily inventory",
+        schedule_type: "custom_cron",
+        cron_expression: "0 2 * * *",
+        next_run_at: new Date("2026-11-04T02:00:00.000Z"),
+      };
+      const updated = { ...existing, schedule_type: "daily", cron_expression: null };
+      const query = vi.spyOn(pool, "query")
+        .mockResolvedValueOnce({ rows: [existing], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [updated], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never);
+
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/schedules/${scheduleId}`,
+        payload: { schedule_type: "daily", cron_expression: null },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().cron_expression).toBeNull();
+      expect(query.mock.calls[1][1]?.[3]).toBeNull();
+      query.mockRestore();
+    });
+
     it("requires QA Engineer or Admin role to create schedules, rejecting viewers", async () => {
       // Inject viewer user into request
       app.addHook("onRequest", async (request) => {
