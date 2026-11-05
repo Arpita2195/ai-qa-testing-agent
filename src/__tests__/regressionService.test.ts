@@ -208,8 +208,6 @@ describe("regressionService", () => {
   describe("detectFlakyTests", () => {
     it("identifies tests that flip between passed and failed and computes score", async () => {
       const projectId = "p-1";
-      let apiFlakinessQuery = "";
-
       vi.mocked(pool.query).mockImplementation(async (sql: string) => {
         if (sql.includes("FROM test_results tr")) {
           return {
@@ -242,10 +240,18 @@ describe("regressionService", () => {
         }
 
         if (sql.includes("FROM api_test_results ar")) {
-          apiFlakinessQuery = sql;
           return {
-            rowCount: 0,
-            rows: [],
+            rowCount: 1,
+            rows: [{
+              endpoint_id: "api-inventory",
+              name: "GET Inventory",
+              total_runs: "9",
+              passed_runs: "4",
+              failed_runs: "5",
+              last_status: "failed",
+              last_run_at: new Date("2026-10-27T12:10:00Z"),
+              last_error: "Status assertion failed: expected 200, actual 401",
+            }],
           } as any;
         }
 
@@ -253,7 +259,7 @@ describe("regressionService", () => {
       });
 
       const flakyList = await detectFlakyTests(projectId);
-      expect(flakyList).toHaveLength(2);
+      expect(flakyList).toHaveLength(3);
 
       // Flakiness score: 2 * min(5, 5) / 10 = 1.0 (50/50 flaky)
       expect(flakyList[0].id).toBe("tc-flaky-1");
@@ -261,10 +267,13 @@ describe("regressionService", () => {
       expect(flakyList[0].module).toBe("checkout");
 
       // Flakiness score: 2 * min(8, 2) / 10 = 0.4
-      expect(flakyList[1].id).toBe("tc-flaky-2");
-      expect(flakyList[1].flakiness_score).toBe(0.4);
-      expect(apiFlakinessQuery).toContain("ar.actual_status >= 400");
-      expect(apiFlakinessQuery).toContain("ar.actual_status < 500");
+      expect(flakyList.find((item) => item.id === "tc-flaky-2")?.flakiness_score).toBe(0.4);
+      expect(flakyList.find((item) => item.id === "api-inventory")).toMatchObject({
+        id: "api-inventory",
+        type: "api",
+        flakiness_score: 0.89,
+        last_error: "Status assertion failed: expected 200, actual 401",
+      });
     });
   });
 
