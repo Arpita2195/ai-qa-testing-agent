@@ -62,8 +62,10 @@ The platform has transitioned from a shared static API key to an enterprise-grad
 - Cookie Name: `qa_session`
 - `httpOnly: true` — Inaccessible to client-side JavaScript, preventing session theft via Cross-Site Scripting (XSS).
 - `sameSite: "lax"` — Balances security with usability, mitigating Cross-Site Request Forgery (CSRF).
-- `secure: NODE_ENV === "production"` — Enforced over HTTPS in production environments.
+- `Secure` is enabled by default when `NODE_ENV=production` and can be forced on in other environments with `COOKIE_SECURE=true`. Local HTTP development leaves it off by default. Production can disable it only with the explicit, temporary `COOKIE_ALLOW_INSECURE_HTTP=true` override; do not use that setting for normal AWS operation.
 - `path: "/"`
+
+For AWS deployments, set `NODE_ENV=production`, `COOKIE_SECURE=true`, and `COOKIE_ALLOW_INSECURE_HTTP=false`. If HTTPS has not yet been enabled and HTTP login testing is unavoidable, temporarily set `COOKIE_ALLOW_INSECURE_HTTP=true`; the backend logs a security warning. Revert it to `false` as soon as HTTPS is available.
 
 ### CSRF Protection
 For cookie-authenticated requests modifying state (`POST`, `PUT`, `PATCH`, `DELETE`):

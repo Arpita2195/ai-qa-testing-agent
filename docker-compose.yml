@@ -98,12 +98,14 @@ services:
         condition: service_healthy
     environment:
       PORT: 3000
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_password_123}@postgres:5432/${POSTGRES_DB:-ai_qa_agent}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       AI_MODEL: ${AI_MODEL:-gemini-2.5-flash}
       PLATFORM_API_KEY: ${PLATFORM_API_KEY}
       COOKIE_SECRET: ${COOKIE_SECRET:-replace_with_a_secure_cookie_signing_secret_at_least_32_characters}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      COOKIE_ALLOW_INSECURE_HTTP: ${COOKIE_ALLOW_INSECURE_HTTP:-false}
       STOCKFLOW_BASE_URL: ${STOCKFLOW_BASE_URL:-https://stockflow-vert-two.vercel.app}
       STOCKFLOW_TEST_EMAIL: ${STOCKFLOW_TEST_EMAIL:-}
       STOCKFLOW_TEST_PASSWORD: ${STOCKFLOW_TEST_PASSWORD:-}

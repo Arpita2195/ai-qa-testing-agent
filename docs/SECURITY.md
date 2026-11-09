@@ -69,7 +69,8 @@ Each protected endpoint executes a two-tier verification check:
 
 1. **Production TLS Enforcement:**
    - Always run the Fastify backend behind a TLS-terminating reverse proxy (e.g., NGINX, Cloudflare) with `NODE_ENV=production`.
-   - Ensure `secure: true` cookies are propagated.
+   - Set `COOKIE_SECURE=true` and `COOKIE_ALLOW_INSECURE_HTTP=false`. The HTTPS Nginx API proxy template forwards `X-Forwarded-Proto: $scheme` when Nginx terminates TLS; with an upstream AWS load balancer, forward its trusted protocol header and restrict Nginx ingress to that load balancer.
+   - `COOKIE_ALLOW_INSECURE_HTTP=true` is a temporary, explicitly opted-in HTTP testing mode only; it logs a production security warning and must be disabled after HTTPS is enabled.
 2. **Secret Rotation:**
    - Change `PLATFORM_API_KEY` periodically.
    - Use secure environment variable managers (AWS Secrets Manager, HashiCorp Vault) rather than hardcoded `.env` files in production.

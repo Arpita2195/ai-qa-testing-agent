@@ -65,7 +65,7 @@ The system is containerized as three orchestrated services connected over an iso
    - Browser navigation is strictly monitored by `urlGuard` and `attachUrlGuardToPage`. Outbound requests and redirects to internal container names (`postgres`, `backend`, `dashboard`, `database`), `.docker.internal`, private IPv4/IPv6 CIDRs, and cloud metadata endpoints (`169.254.169.254`, `fd00:ec2::254`, `metadata.google.internal`) are blocked unconditionally.
 7. **Session Security & Signed Cookies**:
    - Session cookies (`qa_session`) are signed using HMAC-SHA256 with `COOKIE_SECRET`, preventing client-side tampering.
-   - Cookies are marked `HttpOnly: true`, `SameSite: Lax`, and `Secure: true` in production environments.
+   - Cookies are marked `HttpOnly: true`, `SameSite: Lax`, and `Secure: true` by default in production. Local HTTP development leaves `Secure` off; production HTTP testing requires the explicit `COOKIE_ALLOW_INSECURE_HTTP=true` override.
    - Password changes and admin role modifications immediately invalidate all active sessions (`revokeUserSessions`) to close stale privilege access windows.
    - CSRF tokens are cryptographically generated and enforced on state-changing HTTP requests.
 8. **HTTP Security Headers & CORS**:
@@ -108,10 +108,15 @@ Key environment variables:
 | `CORS_ORIGIN` | Allowed web origins | Set to explicit production URL(s) (e.g., `https://qa.example.com`) |
 | `VITE_API_URL` | API endpoint accessed by browser | `https://api.qa.example.com` or `/api` behind reverse proxy |
 | `COOKIE_SECURE` | Force secure cookies over HTTPS | `true` |
+| `COOKIE_ALLOW_INSECURE_HTTP` | Temporarily allow session cookies over HTTP; overrides `COOKIE_SECURE` | `false` (keep false in AWS production) |
 | `NODE_ENV` | Environment identifier | `production` |
 | `DASHBOARD_PORT` | Host port for dashboard | `5173` |
 | `BACKEND_PORT` | Host port for backend API | `3000` |
 | `RUN_MIGRATIONS` | Auto-apply migrations on startup | `true` |
+
+For AWS production, use `NODE_ENV=production`, `COOKIE_SECURE=true`, and `COOKIE_ALLOW_INSECURE_HTTP=false`, and serve the dashboard/API over HTTPS. If temporarily testing through the current HTTP-only AWS address, explicitly set `COOKIE_ALLOW_INSECURE_HTTP=true` and then turn it back off once HTTPS is configured; the backend emits a security warning while this mode is active. For local Docker HTTP development, use `NODE_ENV=development`, `COOKIE_SECURE=false`, and `COOKIE_ALLOW_INSECURE_HTTP=false`. The `npm run dev` workflow does not set production mode, so HTTP cookies work locally by default.
+
+The Nginx HTTPS template proxies `/api/` and forwards `X-Forwarded-Proto: $scheme` when Nginx terminates TLS. If an AWS load balancer terminates TLS before Nginx, pass through the load balancer's trusted `X-Forwarded-Proto` value instead, and restrict Nginx ingress to that load balancer.
 
 ---
 
@@ -277,7 +282,7 @@ Before exposing the application to real production traffic:
   - TLS termination enabled (via Nginx, Cloudflare, AWS ALB, or Traefik).
   - Certificates installed and auto-renewing (Let's Encrypt / Certbot).
   - `Strict-Transport-Security` header verified.
-  - `COOKIE_SECURE=true` enabled so session cookies require HTTPS.
+  - `NODE_ENV=production`, `COOKIE_SECURE=true`, and `COOKIE_ALLOW_INSECURE_HTTP=false` so session cookies require HTTPS.
 - [ ] **CORS Configuration**:
   - `CORS_ORIGIN` matches exact production frontend domain(s) (no wildcards `*`).
 - [ ] **Container Capabilities & Isolation**:
@@ -307,4 +312,3 @@ While Task 11 applies defense-in-depth hardening to the current architecture, th
    - Database runs as a single-instance container with persistent volume storage. High-availability read replicas, automated failover, and continuous WAL archiving to object storage (e.g., pgBackRest / AWS RDS) are recommended for enterprise cloud deployments.
 4. **Secret Management in File / Environment Variables**:
    - Secrets are currently supplied via environment variables (`.env`). In enterprise cloud environments, credentials should be injected at runtime using dedicated secret vaults (e.g., HashiCorp Vault, AWS Secrets Manager, or Kubernetes Secrets).
-

@@ -3,7 +3,9 @@ import cookie from "@fastify/cookie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pool } from "../config/db";
 import { createAuthHook } from "../services/auth";
+import authRoutes from "../routes/auth";
 import projectRoutes from "../routes/projects";
+import { hashPassword } from "../services/passwordService";
 
 vi.mock("../config/db", () => ({
   pool: {
@@ -112,6 +114,119 @@ describe("TASK 4: Website Ownership and Authorization Confirmation", () => {
       expect.stringContaining("INSERT INTO audit_logs"),
       expect.arrayContaining(["WEBSITE_AUTHORIZATION_CONFIRMED"]),
     );
+  });
+
+  it("uses a login cookie for /auth/me, project listing, and project creation", async () => {
+    const userId = "00000000-0000-0000-0000-000000000001";
+    const sessionId = "00000000-0000-0000-0000-000000000002";
+    const passwordHash = await hashPassword("ValidPassword123!");
+    let session: { tokenHash: string; csrfToken: string; expiresAt: Date } | undefined;
+    const listedProject = {
+      id: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      name: "Existing Project",
+      base_url: "https://example.com",
+    };
+
+    vi.mocked(pool.query).mockImplementation(async (sql: string, values?: unknown[]) => {
+      if (sql.includes("FROM users WHERE email = $1")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            id: userId,
+            email: "admin@example.com",
+            password_hash: passwordHash,
+            full_name: "Test Admin",
+            role: "admin",
+            is_active: true,
+          }],
+        } as any;
+      }
+      if (sql.includes("INSERT INTO sessions")) {
+        session = {
+          tokenHash: values?.[1] as string,
+          csrfToken: values?.[2] as string,
+          expiresAt: values?.[3] as Date,
+        };
+        return { rowCount: 1, rows: [] } as any;
+      }
+      if (sql.includes("FROM sessions s")) {
+        return session
+          ? {
+              rowCount: 1,
+              rows: [{
+                session_id: sessionId,
+                user_id: userId,
+                token_hash: session.tokenHash,
+                csrf_token: session.csrfToken,
+                expires_at: session.expiresAt,
+                email: "admin@example.com",
+                full_name: "Test Admin",
+                role: "admin",
+                is_active: true,
+              }],
+            } as any
+          : { rowCount: 0, rows: [] } as any;
+      }
+      if (sql.includes("FROM projects p")) {
+        return { rowCount: 1, rows: [listedProject] } as any;
+      }
+      return { rowCount: 1, rows: [] } as any;
+    });
+
+    const createdProject = {
+      id: "00000000-0000-0000-0000-000000000003",
+      name: "New Project",
+      base_url: "https://new-example.com",
+      owner_confirmed: true,
+      owner_confirmed_at: new Date().toISOString(),
+      owner_confirmed_by: userId,
+      access_status: "unknown",
+      created_at: new Date().toISOString(),
+    };
+    const mockClient = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes("INSERT INTO projects")) {
+          return { rowCount: 1, rows: [createdProject] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    vi.mocked(pool.connect).mockResolvedValueOnce(mockClient as any);
+
+    app!.register(authRoutes);
+    const login = await app!.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: { email: "admin@example.com", password: "ValidPassword123!" },
+    });
+    expect(login.statusCode).toBe(200);
+    const sessionCookie = login.cookies.find((cookie) => cookie.name === "qa_session");
+    expect(sessionCookie).toBeDefined();
+    const cookies = { qa_session: sessionCookie!.value };
+
+    const currentUser = await app!.inject({ method: "GET", url: "/auth/me", cookies });
+    expect(currentUser.statusCode).toBe(200);
+    expect(currentUser.json().user.email).toBe("admin@example.com");
+
+    const projects = await app!.inject({ method: "GET", url: "/projects", cookies });
+    expect(projects.statusCode).toBe(200);
+    expect(projects.json()).toEqual([listedProject]);
+
+    const creation = await app!.inject({
+      method: "POST",
+      url: "/projects",
+      cookies,
+      headers: { "x-csrf-token": login.json().csrfToken },
+      payload: {
+        name: "New Project",
+        base_url: "https://new-example.com",
+        owner_confirmed: true,
+        declaration_text: "I confirm I am authorized to test this website.",
+      },
+    });
+    expect(creation.statusCode).toBe(201);
+    expect(creation.json().id).toBe(createdProject.id);
   });
 
   it("rejects project creation when owner_confirmed is missing (direct API bypass attempt)", async () => {

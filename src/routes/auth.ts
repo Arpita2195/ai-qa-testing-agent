@@ -12,6 +12,17 @@ import {
 import { requireAuth, requirePlatformRole } from "../services/auth";
 import { hashPassword, verifyPassword } from "../services/passwordService";
 import { logAuditEvent } from "../services/auditLogger";
+import { shouldUseSecureSessionCookie } from "../config/sessionCookie";
+
+function getSessionCookieOptions() {
+  return {
+    path: "/",
+    httpOnly: true,
+    secure: shouldUseSecureSessionCookie(),
+    sameSite: "lax" as const,
+    maxAge: 24 * 60 * 60,
+  };
+}
 
 const loginBodySchema = z.object({
   email: z.string().email(),
@@ -66,23 +77,15 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         request.ip,
       );
 
-      // Set secure HTTP-only cookie (signed when cookie secret is configured)
+      // Set HTTP-only cookie (signed when cookie secret is configured)
       try {
         (reply as any).setCookie("qa_session", result.sessionToken, {
-          path: "/",
-          httpOnly: true,
-          secure: process.env.NODE_ENV === "production" || process.env.COOKIE_SECURE === "true",
-          sameSite: "lax",
-          maxAge: 24 * 60 * 60, // 24 hours
+          ...getSessionCookieOptions(),
           signed: true,
         });
       } catch {
         (reply as any).setCookie("qa_session", result.sessionToken, {
-          path: "/",
-          httpOnly: true,
-          secure: process.env.NODE_ENV === "production" || process.env.COOKIE_SECURE === "true",
-          sameSite: "lax",
-          maxAge: 24 * 60 * 60, // 24 hours
+          ...getSessionCookieOptions(),
         });
       }
 
@@ -367,20 +370,12 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
       try {
         (reply as any).setCookie("qa_session", newSession.sessionToken, {
-          path: "/",
-          httpOnly: true,
-          secure: process.env.NODE_ENV === "production" || process.env.COOKIE_SECURE === "true",
-          sameSite: "lax",
-          maxAge: 24 * 60 * 60,
+          ...getSessionCookieOptions(),
           signed: true,
         });
       } catch {
         (reply as any).setCookie("qa_session", newSession.sessionToken, {
-          path: "/",
-          httpOnly: true,
-          secure: process.env.NODE_ENV === "production" || process.env.COOKIE_SECURE === "true",
-          sameSite: "lax",
-          maxAge: 24 * 60 * 60,
+          ...getSessionCookieOptions(),
         });
       }
 

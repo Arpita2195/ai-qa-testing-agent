@@ -15,6 +15,8 @@ const envSchema = z.object({
     .string()
     .min(32, "COOKIE_SECRET must be at least 32 characters long")
     .default("replace_with_a_secure_cookie_signing_secret_at_least_32_characters"),
+  COOKIE_SECURE: z.enum(["true", "false"]).optional(),
+  COOKIE_ALLOW_INSECURE_HTTP: z.enum(["true", "false"]).default("false"),
   ALLOW_PRIVATE_TARGETS: z.string().optional().default("false"),
   CORS_ORIGIN: z.string().optional(),
   STOCKFLOW_BASE_URL: z
@@ -52,6 +54,11 @@ if (!result.success) {
 
 // Production security warnings
 if (process.env.NODE_ENV === "production") {
+  if (result.data.COOKIE_ALLOW_INSECURE_HTTP === "true") {
+    console.warn(
+      "[SECURITY WARNING] COOKIE_ALLOW_INSECURE_HTTP=true disables Secure on session cookies. Use only temporarily for HTTP testing and set it to false after enabling HTTPS.",
+    );
+  }
   if (result.data.COOKIE_SECRET.includes("replace_with_a_secure_cookie_signing_secret")) {
     console.warn(
       "[SECURITY WARNING] COOKIE_SECRET is using the default placeholder in production. Set a unique, cryptographically strong secret of at least 32 characters.",
