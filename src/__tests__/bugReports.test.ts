@@ -36,6 +36,43 @@ describe("Bug report API failures", () => {
     await app.close();
   });
 
+  it("filters bug reports to the selected project", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000003";
+    const query = vi.spyOn(pool, "query").mockResolvedValueOnce({
+      rows: [],
+      rowCount: 0,
+    } as never);
+    const app = Fastify();
+    app.register(bugReportRoutes);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/bug-reports?projectId=${projectId}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "COALESCE(tc.project_id, web_run.project_id, api_run.project_id) = $1",
+      ),
+      [projectId],
+    );
+    await app.close();
+  });
+
+  it("rejects an invalid project filter", async () => {
+    const app = Fastify();
+    app.register(bugReportRoutes);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/bug-reports?projectId=not-a-uuid",
+    });
+
+    expect(response.statusCode).toBe(400);
+    await app.close();
+  });
+
   it("allows an API bug report to be reviewed", async () => {
     const query = vi.spyOn(pool, "query")
       .mockResolvedValueOnce({

@@ -5029,8 +5029,47 @@ function RunFileButton({
 }
 
 function BugReportsPage() {
-  const { data, loading, error, reload } = useResource<BugReport[]>("/bug-reports");
+  const { data: projects, loading: projectsLoading, error: projectsError } =
+    useResource<Project[]>("/projects");
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [reports, setReports] = useState<BugReport[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
   const [message, setMessage] = useState("");
+  const reload = useCallback(() => setReloadKey((value) => value + 1), []);
+
+  useEffect(() => {
+    if (!selectedProjectId && projects?.length) {
+      setSelectedProjectId(projects[0].id);
+    }
+  }, [projects, selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setReports(null);
+      setLoading(false);
+      return;
+    }
+    let active = true;
+    setLoading(true);
+    setError("");
+    setReports(null);
+    api<BugReport[]>(`/bug-reports?projectId=${encodeURIComponent(selectedProjectId)}`)
+      .then((result) => {
+        if (active) setReports(result);
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId, reloadKey]);
+
   async function setStatus(id: string, status: string) {
     try {
       await api(`/bug-reports/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
@@ -5039,11 +5078,34 @@ function BugReportsPage() {
       setMessage(reason instanceof Error ? reason.message : String(reason));
     }
   }
-  return <section><h1>Bug reports</h1>{message && <p className="error">{message}</p>}
-    <State loading={loading} error={error}>
-      {(data ?? []).length === 0 ? (
+  const selectedProject = projects?.find((project) => project.id === selectedProjectId);
+  return <section>
+    <h1>Bug reports</h1>
+    <p className="muted">Review reports for one project at a time.</p>
+    <div style={{ margin: "16px 0", display: "flex", alignItems: "center", gap: "10px" }}>
+      <label htmlFor="bug-report-project"><strong>Project</strong></label>
+      <select
+        id="bug-report-project"
+        value={selectedProjectId}
+        disabled={projectsLoading || !projects?.length}
+        onChange={(event) => setSelectedProjectId(event.target.value)}
+        style={{ minWidth: "240px", maxWidth: "100%" }}
+      >
+        {projectsLoading && <option value="">Loading projects…</option>}
+        {!projectsLoading && !projects?.length && <option value="">No projects available</option>}
+        {(projects ?? []).map((project) => (
+          <option key={project.id} value={project.id}>{project.name}</option>
+        ))}
+      </select>
+    </div>
+    {message && <p className="error" role="alert">{message}</p>}
+    {projectsError ? <p className="notice error">{projectsError}</p> : null}
+    <State loading={projectsLoading || loading} error={error}>
+      {!selectedProjectId ? (
+        <p className="notice">Select a project to view its bug reports.</p>
+      ) : (reports ?? []).length === 0 ? (
         <div className="empty-state">
-          <h2>No bug reports yet</h2>
+          <h2>No bug reports for {selectedProject?.name ?? "this project"}</h2>
           <p>Failed API checks appear here automatically. Failed web tests appear after failure analysis; passing tests do not create reports.</p>
           <ol>
             <li>Run approved API checks; failed checks are added here automatically.</li>
@@ -5052,7 +5114,7 @@ function BugReportsPage() {
           </ol>
           <Link className="button-link" to="/projects">Open projects</Link>
         </div>
-      ) : (data ?? []).map((report) => <article className="row-card" key={report.id}>
+      ) : (reports ?? []).map((report) => <article className="row-card" key={report.id}>
           <div><strong>{report.title}</strong><p>{report.source === "api" ? "API check" : "Web test"} · {report.classification} · {report.severity}</p><p>{report.description || report.probable_cause}</p><span className={`badge ${report.status}`}>{report.status}</span></div>
           <div className="actions"><button onClick={() => setStatus(report.id, "confirmed")}>Confirm</button><button className="secondary" onClick={() => setStatus(report.id, "dismissed")}>Dismiss</button></div>
         </article>)}

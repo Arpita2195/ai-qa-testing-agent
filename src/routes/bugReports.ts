@@ -21,6 +21,10 @@ const statusBodySchema = z.object({
   status: z.enum(["confirmed", "dismissed", "suspected"]),
 });
 
+const bugReportsQuerySchema = z.object({
+  projectId: z.string().uuid().optional(),
+});
+
 interface FailureRow {
   result_id: string;
   test_case_id: string;
@@ -192,11 +196,40 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  fastify.get("/bug-reports", async (request) => {
+  fastify.get("/bug-reports", async (request, reply) => {
+    const query = bugReportsQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.code(400).send({ error: "Invalid projectId: expected a UUID" });
+    }
+
+    if (query.data.projectId && request.user) {
+      try {
+        await assertProjectAccess(request.user, query.data.projectId, "viewer");
+      } catch (error) {
+        return reply.code(403).send({
+          error: error instanceof Error ? error.message : "Access denied",
+        });
+      }
+    }
+
     const userId = request.user?.id;
     const isProjectScopedUser = Boolean(request.user &&
       request.user.role !== "admin" &&
       !request.user.isServiceAccount);
+    const filters: string[] = [];
+    const values: string[] = [];
+    if (query.data.projectId) {
+      values.push(query.data.projectId);
+      filters.push(
+        `COALESCE(tc.project_id, web_run.project_id, api_run.project_id) = $${values.length}`,
+      );
+    }
+    if (isProjectScopedUser && userId) {
+      values.push(userId);
+      filters.push(
+        `EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = COALESCE(tc.project_id, web_run.project_id, api_run.project_id) AND pm.user_id = $${values.length})`,
+      );
+    }
     const reports = await pool.query<BugReportRow>(
       `SELECT br.*, COALESCE(tc.title, ae.name) AS test_case_title,
               CASE WHEN br.api_result_id IS NULL THEN 'web' ELSE 'api' END AS source
@@ -207,11 +240,9 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
        LEFT JOIN test_results tr ON tr.id = br.result_id
        LEFT JOIN test_runs web_run ON web_run.id = tr.run_id
        LEFT JOIN test_runs api_run ON api_run.id = ar.run_id
-       ${isProjectScopedUser
-         ? "WHERE EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = COALESCE(tc.project_id, web_run.project_id, api_run.project_id) AND pm.user_id = $1)"
-         : ""}
+       ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
        ORDER BY br.created_at DESC`,
-      isProjectScopedUser && userId ? [userId] : [],
+      values,
     );
     return reports.rows;
   });
