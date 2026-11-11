@@ -213,7 +213,7 @@ export async function processJob(jobId: string): Promise<boolean> {
     const enqueuedAt = new Date(jobRow.enqueued_at);
     const queueDelayMs = Math.max(0, startedAt.getTime() - enqueuedAt.getTime());
 
-    inMemoryMetrics.trackQueueDelay(queueDelayMs);
+    inMemoryMetrics.trackQueueDelay(queueDelayMs, jobRow.project_id);
     logger.info(`Claimed background job ${jobId} (${jobRow.job_type})`, {
       jobId,
       jobType: jobRow.job_type,
@@ -244,7 +244,7 @@ export async function processJob(jobId: string): Promise<boolean> {
 
   if (!handler) {
     const errorMsg = `No worker registered for jobType "${job.jobType}"`;
-    inMemoryMetrics.trackWorkerFailure();
+    inMemoryMetrics.trackWorkerFailure(job.projectId);
     logger.error(errorMsg, undefined, { jobId, jobType: job.jobType });
     await pool.query(
       `UPDATE background_jobs
@@ -281,7 +281,7 @@ export async function processJob(jobId: string): Promise<boolean> {
     const nextRetries = job.retries + 1;
 
     if (nextRetries < job.maxRetries) {
-      inMemoryMetrics.trackWorkerRetry();
+      inMemoryMetrics.trackWorkerRetry(job.projectId);
       logger.warn(`Background job ${jobId} failed; scheduling retry ${nextRetries}/${job.maxRetries}`, {
         jobId,
         jobType: job.jobType,
@@ -297,7 +297,7 @@ export async function processJob(jobId: string): Promise<boolean> {
         [nextRetries, errorMsg, durationMs, jobId],
       );
     } else {
-      inMemoryMetrics.trackWorkerFailure();
+      inMemoryMetrics.trackWorkerFailure(job.projectId);
       logger.error(`Background job ${jobId} failed permanently after ${nextRetries} attempts`, err, {
         jobId,
         jobType: job.jobType,

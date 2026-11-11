@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, apiBase } from "../App";
 
@@ -86,6 +86,11 @@ export interface SystemMetricsResponse {
   timestamp: string;
 }
 
+interface MonitoringProject {
+  id: string;
+  name: string;
+}
+
 export interface JobItem {
   id: string;
   projectId: string;
@@ -107,32 +112,60 @@ export interface JobItem {
 export function MonitoringDashboardPage() {
   const [health, setHealth] = useState<SystemHealthResponse | null>(null);
   const [metrics, setMetrics] = useState<SystemMetricsResponse | null>(null);
+  const [projects, setProjects] = useState<MonitoringProject[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
   const [loading, setLoading] = useState(true);
+  const [projectsLoading, setProjectsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [projectsError, setProjectsError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
+  const activeRequest = useRef(0);
 
-  async function loadData() {
+  const selectedProject = projects.find((project) => project.id === selectedProjectId);
+
+  const loadData = useCallback(async (projectId: string) => {
+    const requestId = ++activeRequest.current;
     setError("");
+    setLoading(true);
     try {
       const [healthRes, metricsRes] = await Promise.all([
         api<SystemHealthResponse>("/api/monitoring/health"),
-        api<SystemMetricsResponse>("/api/monitoring/metrics"),
+        projectId
+          ? api<SystemMetricsResponse>(
+              `/api/monitoring/metrics?projectId=${encodeURIComponent(projectId)}`,
+            )
+          : Promise.resolve(null),
       ]);
+      if (requestId !== activeRequest.current) return;
       setHealth(healthRes);
       setMetrics(metricsRes);
       setLastUpdated(new Date());
     } catch (err: any) {
-      setError(err.message || "Failed to load telemetry");
+      if (requestId === activeRequest.current) {
+        setError(err.message || "Failed to load telemetry");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === activeRequest.current) setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 10000); // 10s auto-refresh
-    return () => clearInterval(interval);
+    api<MonitoringProject[]>("/projects")
+      .then((projectRows) => {
+        setProjects(projectRows);
+        setSelectedProjectId(projectRows[0]?.id ?? "");
+      })
+      .catch((err: unknown) => {
+        setProjectsError(err instanceof Error ? err.message : "Failed to load projects");
+      })
+      .finally(() => setProjectsLoading(false));
   }, []);
+
+  useEffect(() => {
+    void loadData(selectedProjectId);
+    const interval = setInterval(() => void loadData(selectedProjectId), 10000);
+    return () => clearInterval(interval);
+  }, [loadData, selectedProjectId]);
 
   if (loading && !health) {
     return (
@@ -151,24 +184,46 @@ export function MonitoringDashboardPage() {
     <section style={{ maxWidth: "1200px", margin: "0 auto", padding: "10px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: "1.75rem" }}>System Monitoring & Observability</h1>
+          <h1 style={{ margin: 0, fontSize: "1.75rem" }}>Project Monitoring & Observability</h1>
           <p className="muted" style={{ margin: "4px 0 0" }}>
-            Real-time telemetry, background workers, S3 storage status, and AI cost tracking
+            Test executions, background jobs, and AI usage for one project at a time
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
           <span style={{ fontSize: "0.8rem", color: "#64748b" }}>
             Updated: {lastUpdated.toLocaleTimeString()}
           </span>
-          <button className="secondary" onClick={() => loadData()} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
+          <button className="secondary" onClick={() => void loadData(selectedProjectId)} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
             Refresh
           </button>
         </div>
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "18px", flexWrap: "wrap" }}>
+        <label htmlFor="observability-project" style={{ fontWeight: 600 }}>Project</label>
+        <select
+          id="observability-project"
+          value={selectedProjectId}
+          disabled={projectsLoading || projects.length === 0}
+          onChange={(event) => {
+            setMetrics(null);
+            setSelectedProjectId(event.target.value);
+          }}
+          style={{ minWidth: "260px", maxWidth: "100%" }}
+        >
+          {projectsLoading && <option value="">Loading projects…</option>}
+          {!projectsLoading && projects.length === 0 && <option value="">No projects available</option>}
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>{project.name}</option>
+          ))}
+        </select>
+      </div>
+
       {error && <p className="notice error">{error}</p>}
+      {projectsError && <p className="notice error">{projectsError}</p>}
 
       {/* 1. Subsystem Health Status Bar */}
+      <h2 style={{ margin: "0 0 10px", fontSize: "1rem" }}>System-wide infrastructure health</h2>
       <div className="monitoring-health-grid">
         <div
           className="card"
@@ -227,6 +282,18 @@ export function MonitoringDashboardPage() {
         </div>
       </div>
 
+      {projectsLoading ? (
+        <p className="notice" style={{ marginTop: "20px" }}>Loading projects…</p>
+      ) : projects.length === 0 ? (
+        <p className="notice" style={{ marginTop: "20px" }}>
+          No projects are available to your account. Project telemetry will appear here after you are assigned to a project.
+        </p>
+      ) : !metrics ? (
+        <p className="notice" style={{ marginTop: "20px" }}>
+          {loading ? `Loading telemetry for ${selectedProject?.name ?? "the selected project"}…` : "Project telemetry is not available."}
+        </p>
+      ) : (
+      <>
       {/* 2. Active Alerts Banner */}
       {m?.alerts && m.alerts.length > 0 && (
         <div style={{ marginBottom: "20px" }}>
@@ -361,7 +428,7 @@ export function MonitoringDashboardPage() {
       <div className="card" style={{ padding: "18px", background: "#f8fafc" }}>
         <h4 style={{ margin: "0 0 8px", fontSize: "1rem" }}>External telemetry & scraping endpoints</h4>
         <p className="muted" style={{ margin: "0 0 12px", fontSize: "0.85rem" }}>
-          Use these endpoints for Prometheus scraping, Grafana dashboards, and external monitoring integrations:
+          Project metrics above show <strong>{selectedProject?.name}</strong> only. Infrastructure health and Prometheus scraping remain system-wide.
         </p>
         <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
           <a
@@ -395,7 +462,7 @@ export function MonitoringDashboardPage() {
             Detailed health check (/api/monitoring/health)
           </a>
           <a
-            href={`${apiBase}/api/monitoring/metrics`}
+            href={`${apiBase}/api/monitoring/metrics?projectId=${encodeURIComponent(selectedProjectId)}`}
             target="_blank"
             rel="noopener noreferrer"
             style={{
@@ -407,10 +474,12 @@ export function MonitoringDashboardPage() {
               fontSize: "0.85rem",
             }}
           >
-            JSON metrics API (/api/monitoring/metrics)
+            Selected project JSON metrics API
           </a>
         </div>
       </div>
+      </>
+      )}
     </section>
   );
 }

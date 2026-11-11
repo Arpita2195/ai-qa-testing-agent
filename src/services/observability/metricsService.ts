@@ -40,9 +40,13 @@ export interface ActiveAlert {
 // In-memory sliding window counters for real-time observability
 class MetricsTracker {
   private executionDurations: number[] = [];
+  private executionDurationsByProject = new Map<string, number[]>();
   private queueDelays: number[] = [];
+  private queueDelaysByProject = new Map<string, number[]>();
   private workerRetries: number = 0;
+  private workerRetriesByProject = new Map<string, number>();
   private workerFailures: number = 0;
+  private workerFailuresByProject = new Map<string, number>();
   private apiErrorsByRoute: Map<string, number> = new Map();
   private totalApiRequests: number = 0;
 
@@ -55,24 +59,48 @@ class MetricsTracker {
       if (this.executionDurations.length > this.MAX_WINDOW_SIZE) {
         this.executionDurations.shift();
       }
+      if (metric.projectId) {
+        const durations = this.executionDurationsByProject.get(metric.projectId) ?? [];
+        durations.push(metric.durationMs);
+        if (durations.length > this.MAX_WINDOW_SIZE) durations.shift();
+        this.executionDurationsByProject.set(metric.projectId, durations);
+      }
     }
   }
 
-  trackQueueDelay(delayMs: number): void {
+  trackQueueDelay(delayMs: number, projectId?: string): void {
     if (delayMs >= 0) {
       this.queueDelays.push(delayMs);
       if (this.queueDelays.length > this.MAX_WINDOW_SIZE) {
         this.queueDelays.shift();
       }
+      if (projectId) {
+        const delays = this.queueDelaysByProject.get(projectId) ?? [];
+        delays.push(delayMs);
+        if (delays.length > this.MAX_WINDOW_SIZE) delays.shift();
+        this.queueDelaysByProject.set(projectId, delays);
+      }
     }
   }
 
-  trackWorkerRetry(): void {
+  trackWorkerRetry(projectId?: string): void {
     this.workerRetries++;
+    if (projectId) {
+      this.workerRetriesByProject.set(
+        projectId,
+        (this.workerRetriesByProject.get(projectId) ?? 0) + 1,
+      );
+    }
   }
 
-  trackWorkerFailure(): void {
+  trackWorkerFailure(projectId?: string): void {
     this.workerFailures++;
+    if (projectId) {
+      this.workerFailuresByProject.set(
+        projectId,
+        (this.workerFailuresByProject.get(projectId) ?? 0) + 1,
+      );
+    }
   }
 
   trackApiRequest(statusCode: number, route: string = "unknown"): void {
@@ -97,33 +125,39 @@ class MetricsTracker {
     return Math.round(sum / values.length);
   }
 
-  getExecutionDurationStats() {
+  getExecutionDurationStats(projectId?: string) {
+    const durations = projectId
+      ? this.executionDurationsByProject.get(projectId) ?? []
+      : this.executionDurations;
     return {
-      count: this.executionDurations.length,
-      avgMs: this.calculateAverage(this.executionDurations),
-      p50Ms: this.calculatePercentile(this.executionDurations, 50),
-      p95Ms: this.calculatePercentile(this.executionDurations, 95),
-      p99Ms: this.calculatePercentile(this.executionDurations, 99),
-      minMs: this.executionDurations.length ? Math.min(...this.executionDurations) : 0,
-      maxMs: this.executionDurations.length ? Math.max(...this.executionDurations) : 0,
+      count: durations.length,
+      avgMs: this.calculateAverage(durations),
+      p50Ms: this.calculatePercentile(durations, 50),
+      p95Ms: this.calculatePercentile(durations, 95),
+      p99Ms: this.calculatePercentile(durations, 99),
+      minMs: durations.length ? Math.min(...durations) : 0,
+      maxMs: durations.length ? Math.max(...durations) : 0,
     };
   }
 
-  getQueueDelayStats() {
+  getQueueDelayStats(projectId?: string) {
+    const delays = projectId
+      ? this.queueDelaysByProject.get(projectId) ?? []
+      : this.queueDelays;
     return {
-      count: this.queueDelays.length,
-      avgMs: this.calculateAverage(this.queueDelays),
-      p50Ms: this.calculatePercentile(this.queueDelays, 50),
-      p95Ms: this.calculatePercentile(this.queueDelays, 95),
-      minMs: this.queueDelays.length ? Math.min(...this.queueDelays) : 0,
-      maxMs: this.queueDelays.length ? Math.max(...this.queueDelays) : 0,
+      count: delays.length,
+      avgMs: this.calculateAverage(delays),
+      p50Ms: this.calculatePercentile(delays, 50),
+      p95Ms: this.calculatePercentile(delays, 95),
+      minMs: delays.length ? Math.min(...delays) : 0,
+      maxMs: delays.length ? Math.max(...delays) : 0,
     };
   }
 
-  getWorkerStats() {
+  getWorkerStats(projectId?: string) {
     return {
-      retries: this.workerRetries,
-      failures: this.workerFailures,
+      retries: projectId ? this.workerRetriesByProject.get(projectId) ?? 0 : this.workerRetries,
+      failures: projectId ? this.workerFailuresByProject.get(projectId) ?? 0 : this.workerFailures,
     };
   }
 
@@ -140,9 +174,13 @@ class MetricsTracker {
 
   reset(): void {
     this.executionDurations = [];
+    this.executionDurationsByProject.clear();
     this.queueDelays = [];
+    this.queueDelaysByProject.clear();
     this.workerRetries = 0;
+    this.workerRetriesByProject.clear();
     this.workerFailures = 0;
+    this.workerFailuresByProject.clear();
     this.apiErrorsByRoute.clear();
     this.totalApiRequests = 0;
   }
@@ -345,7 +383,7 @@ export async function getSystemMetrics(projectId?: string): Promise<{
     });
   }
 
-  const workerStats = inMemoryMetrics.getWorkerStats();
+  const workerStats = inMemoryMetrics.getWorkerStats(projectId);
   if (workerStats.failures > 3) {
     activeAlerts.push({
       ruleId: "worker_failures_detected",
@@ -358,7 +396,7 @@ export async function getSystemMetrics(projectId?: string): Promise<{
     });
   }
 
-  const queueStats = inMemoryMetrics.getQueueDelayStats();
+  const queueStats = inMemoryMetrics.getQueueDelayStats(projectId);
   if (queueStats.avgMs > 15000) {
     activeAlerts.push({
       ruleId: "high_queue_delay",
@@ -380,7 +418,7 @@ export async function getSystemMetrics(projectId?: string): Promise<{
       inconclusive: testCounts.inconclusive,
       flaky: testCounts.flaky,
       passRatePercent,
-      duration: inMemoryMetrics.getExecutionDurationStats(),
+      duration: inMemoryMetrics.getExecutionDurationStats(projectId),
     },
     jobs: {
       pending: jobCounts.pending,

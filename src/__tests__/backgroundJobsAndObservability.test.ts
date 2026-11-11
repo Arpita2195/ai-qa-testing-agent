@@ -486,6 +486,52 @@ describe("TASKS 12, 13 & 14: Background Jobs, Artifact Storage & Observability",
       expect(stats.p95Ms).toBe(1000);
     });
 
+    it("keeps execution and worker telemetry isolated by project", async () => {
+      const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const projectB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      inMemoryMetrics.trackTestExecution({
+        status: "passed",
+        durationMs: 120,
+        projectId: projectA,
+      });
+      inMemoryMetrics.trackTestExecution({
+        status: "failed",
+        durationMs: 900,
+        projectId: projectB,
+      });
+      inMemoryMetrics.trackQueueDelay(30, projectA);
+      inMemoryMetrics.trackQueueDelay(700, projectB);
+      inMemoryMetrics.trackWorkerRetry(projectB);
+      inMemoryMetrics.trackWorkerFailure(projectB);
+
+      (pool.query as any)
+        .mockResolvedValueOnce({
+          rowCount: 1,
+          rows: [{ total: 1, passed: 1, failed: 0, skipped: 0, inconclusive: 0, flaky: 0 }],
+        })
+        .mockResolvedValueOnce({
+          rowCount: 1,
+          rows: [{ total: 1, pending: 0, active: 0, completed: 1, failed: 0, retrying: 0, cancelled: 0 }],
+        })
+        .mockResolvedValueOnce({
+          rowCount: 1,
+          rows: [{ total_requests: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, total_cost_usd: 0 }],
+        })
+        .mockResolvedValueOnce({ rowCount: 0, rows: [] });
+
+      const metrics = await getSystemMetrics(projectA);
+
+      expect(pool.query).toHaveBeenNthCalledWith(1, expect.stringContaining("WHERE r.project_id = $1"), [projectA]);
+      expect(pool.query).toHaveBeenNthCalledWith(2, expect.stringContaining("WHERE project_id = $1"), [projectA]);
+      expect(pool.query).toHaveBeenNthCalledWith(3, expect.stringContaining("WHERE project_id = $1"), [projectA]);
+      expect(metrics.tests.duration.count).toBe(1);
+      expect(metrics.tests.duration.avgMs).toBe(120);
+      expect(metrics.jobs.queueDelay.count).toBe(1);
+      expect(metrics.jobs.queueDelay.avgMs).toBe(30);
+      expect(metrics.jobs.worker.retries).toBe(0);
+      expect(metrics.jobs.worker.failures).toBe(0);
+    });
+
     it("generates Prometheus scrapable metrics exposition format", async () => {
       (pool.query as any)
         // 1. test counts
