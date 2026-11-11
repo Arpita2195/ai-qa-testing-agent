@@ -3497,10 +3497,10 @@ function ApiEndpointsTab({ projectId }: { projectId: string }) {
     </form>
     {message && <p className="notice error">{message}</p>}
     <State loading={loading} error={error}>
-      {(data ?? []).map((endpoint) => <article className="row-card" key={endpoint.id}>
-        <div><strong>{endpoint.name}</strong><p>{endpoint.method} {endpoint.path}</p></div>
-        <span className={`badge ${endpoint.review_status}`}>{endpoint.review_status}</span>
-        <div className="actions">
+      {(data ?? []).map((endpoint) => <article className="row-card api-endpoint-row" key={endpoint.id}>
+        <div className="api-endpoint-details"><strong>{endpoint.name}</strong><p>{endpoint.method} {endpoint.path}</p></div>
+        <span className={`badge ${endpoint.review_status} api-endpoint-status`}>{endpoint.review_status}</span>
+        <div className="actions api-endpoint-actions">
           {endpoint.review_status === "pending" && <>
             <button onClick={() => void reviewEndpoint(endpoint.id, "approved")}>Approve</button>
             <button className="secondary" onClick={() => void reviewEndpoint(endpoint.id, "rejected")}>Reject</button>
