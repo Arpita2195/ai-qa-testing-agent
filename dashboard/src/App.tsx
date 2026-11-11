@@ -172,6 +172,7 @@ interface Project {
   id: string;
   name: string;
   base_url: string;
+  user_project_role?: "qa_manager" | "qa_engineer" | "viewer";
   owner_confirmed?: boolean;
   owner_confirmed_at?: string | null;
   owner_confirmed_by?: string | null;
@@ -1485,6 +1486,8 @@ function ProjectsPage() {
   const [ownerConfirmed, setOwnerConfirmed] = useState(false);
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState("");
+  const [deleteError, setDeleteError] = useState("");
 
   async function createProject(event: FormEvent) {
     event.preventDefault();
@@ -1512,6 +1515,23 @@ function ProjectsPage() {
       setFormError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function deleteProject(project: Project) {
+    if (!confirm(`Delete project "${project.name}"? This action cannot be undone.`)) {
+      return;
+    }
+
+    setDeletingProjectId(project.id);
+    setDeleteError("");
+    try {
+      await api(`/projects/${project.id}`, { method: "DELETE" });
+      reload();
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDeletingProjectId("");
     }
   }
 
@@ -1578,28 +1598,46 @@ function ProjectsPage() {
         </form>
       )}
       {formError && <p className="error">{formError}</p>}
+      {deleteError && <p className="error" role="alert">{deleteError}</p>}
       <State loading={loading} error={error}>
         <div className="cards">
-          {(data ?? []).map((project) => (
-            <Link className="card" key={project.id} to={`/projects/${project.id}`}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <strong>{project.name}</strong>
-                {project.owner_confirmed && (
-                  <span className="authorization-status">Authorized</span>
+          {(data ?? []).map((project) => {
+            const canDelete =
+              user?.role === "admin" || project.user_project_role === "qa_manager";
+            return (
+              <div className="project-card-item" key={project.id}>
+                <Link className="card" to={`/projects/${project.id}`}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <strong>{project.name}</strong>
+                    {project.owner_confirmed && (
+                      <span className="authorization-status">Authorized</span>
+                    )}
+                  </div>
+                  <span>{project.base_url}</span>
+                  <span style={{ fontSize: "0.8rem", color: project.has_credentials || project.has_session ? "#1c6b42" : "#80621b" }}>
+                    {project.has_session
+                      ? "Session saved"
+                      : project.has_credentials
+                        ? "Credentials saved"
+                        : project.access_status === "login_required"
+                          ? "Login required"
+                          : "Public"}
+                  </span>
+                </Link>
+                {canDelete && (
+                  <button
+                    type="button"
+                    className="project-delete-button"
+                    disabled={deletingProjectId === project.id}
+                    onClick={() => void deleteProject(project)}
+                    aria-label={`Delete project ${project.name}`}
+                  >
+                    {deletingProjectId === project.id ? "Deleting…" : "Delete project"}
+                  </button>
                 )}
               </div>
-              <span>{project.base_url}</span>
-              <span style={{ fontSize: "0.8rem", color: project.has_credentials || project.has_session ? "#1c6b42" : "#80621b" }}>
-                {project.has_session
-                  ? "Session saved"
-                  : project.has_credentials
-                    ? "Credentials saved"
-                    : project.access_status === "login_required"
-                      ? "Login required"
-                      : "Public"}
-              </span>
-            </Link>
-          ))}
+            );
+          })}
           {data?.length === 0 && <p className="notice">No projects yet.</p>}
         </div>
       </State>
