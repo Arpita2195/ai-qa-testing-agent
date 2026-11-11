@@ -3403,6 +3403,7 @@ function ApiEndpointsTab({ projectId }: { projectId: string }) {
   const [message, setMessage] = useState("");
   const [specText, setSpecText] = useState("");
   const [importing, setImporting] = useState(false);
+  const [runningEndpointId, setRunningEndpointId] = useState<string | null>(null);
   const navigate = useNavigate();
 
   async function addEndpoint(event: FormEvent) {
@@ -3465,6 +3466,23 @@ function ApiEndpointsTab({ projectId }: { projectId: string }) {
     }
   }
 
+  async function runEndpoint(endpoint: ApiEndpoint) {
+    if (endpoint.review_status !== "approved") return;
+    setRunningEndpointId(endpoint.id);
+    setMessage("");
+    try {
+      const result = await api<Run>(`/projects/${projectId}/api-runs`, {
+        method: "POST",
+        body: JSON.stringify({ endpointId: endpoint.id }),
+      });
+      navigate(`/runs/${result.id}`);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRunningEndpointId(null);
+    }
+  }
+
   return <div className="tab-content">
     <form className="inline-form" onSubmit={addEndpoint}>
       <input required placeholder="Endpoint name" value={name} onChange={(event) => setName(event.target.value)} />
@@ -3482,7 +3500,21 @@ function ApiEndpointsTab({ projectId }: { projectId: string }) {
       {(data ?? []).map((endpoint) => <article className="row-card" key={endpoint.id}>
         <div><strong>{endpoint.name}</strong><p>{endpoint.method} {endpoint.path}</p></div>
         <span className={`badge ${endpoint.review_status}`}>{endpoint.review_status}</span>
-        {endpoint.review_status === "pending" && <div className="actions"><button onClick={() => void reviewEndpoint(endpoint.id, "approved")}>Approve</button><button className="secondary" onClick={() => void reviewEndpoint(endpoint.id, "rejected")}>Reject</button></div>}
+        <div className="actions">
+          {endpoint.review_status === "pending" && <>
+            <button onClick={() => void reviewEndpoint(endpoint.id, "approved")}>Approve</button>
+            <button className="secondary" onClick={() => void reviewEndpoint(endpoint.id, "rejected")}>Reject</button>
+          </>}
+          <button
+            type="button"
+            className="secondary"
+            disabled={endpoint.review_status !== "approved" || runningEndpointId !== null}
+            title={endpoint.review_status !== "approved" ? "Approve this endpoint before running it" : undefined}
+            onClick={() => void runEndpoint(endpoint)}
+          >
+            {runningEndpointId === endpoint.id ? "Running…" : "Run"}
+          </button>
+        </div>
       </article>)}
     </State>
   </div>;

@@ -12,6 +12,9 @@ import { assertProjectAccess } from "../services/authService";
 
 const projectParamsSchema = z.object({ projectId: z.string().uuid() });
 const idParamsSchema = z.object({ id: z.string().uuid() });
+const apiRunBodySchema = z.object({
+  endpointId: z.string().uuid().optional(),
+});
 
 interface ProjectRow {
   id: string;
@@ -52,6 +55,13 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
         await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
       }
 
+      const body = apiRunBodySchema.safeParse(request.body ?? {});
+      if (!body.success) {
+        return reply.code(400).send({
+          error: "Invalid API run payload: endpointId must be a UUID",
+        });
+      }
+
       const projectResult = await pool.query<ProjectRow>(
         "SELECT id, base_url FROM projects WHERE id = $1",
         [params.data.projectId],
@@ -59,6 +69,21 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
       const project = projectResult.rows[0];
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
+      }
+
+      const endpoints = await pool.query<EndpointRow>(
+        `SELECT id, name, method, path, headers, body, expected_status,
+                expected_fields, max_response_ms
+         FROM api_endpoints
+         WHERE project_id = $1 AND review_status = 'approved'
+           AND ($2::uuid IS NULL OR id = $2)
+         ORDER BY created_at ASC`,
+        [project.id, body.data.endpointId ?? null],
+      );
+      if (body.data.endpointId && endpoints.rowCount === 0) {
+        return reply.code(404).send({
+          error: "Approved API endpoint not found in this project",
+        });
       }
 
       const runResult = await pool.query<RunRow>(
@@ -71,14 +96,6 @@ const apiRunRoutes: FastifyPluginAsync = async (fastify) => {
         throw new Error("Failed to create API test run");
       }
 
-      const endpoints = await pool.query<EndpointRow>(
-        `SELECT id, name, method, path, headers, body, expected_status,
-                expected_fields, max_response_ms
-         FROM api_endpoints
-         WHERE project_id = $1 AND review_status = 'approved'
-         ORDER BY created_at ASC`,
-        [project.id],
-      );
       const results: Array<ApiResultRow & { name: string }> = [];
       const authState = createApiProjectAuthState();
       for (const endpoint of endpoints.rows) {
