@@ -1,0 +1,25 @@
+﻿name: Deploy AI QA Testing Agent to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Deploy application on EC2
+        shell: bash
+        run: /home/ec2-user/ai-qa-production/deploy.sh
