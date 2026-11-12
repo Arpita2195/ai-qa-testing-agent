@@ -46,6 +46,8 @@ button.secondary { background:#e8edf2; color:#34465a; }
 .trend path { fill:none; stroke:#16827c; stroke-width:3; }
 .trend circle { fill:#16827c; }
 .visual-card { align-items:flex-start; flex-direction:column; }
+.visual-check-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; }
+.visual-check-heading > div { min-width:0; }
 .visual-images { display:flex; align-items:flex-start; gap:14px; width:100%; overflow-x:auto; }
 .visual-images > div { display:flex; flex:0 0 auto; flex-direction:column; gap:8px; max-width:32%; }
 .visual-preview { display:block; max-width:100%; max-height:320px; object-fit:contain; border:1px solid #dbe2ea; background:#f6f8fa; }

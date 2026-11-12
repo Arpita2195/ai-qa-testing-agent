@@ -3,18 +3,20 @@ import { z } from "zod";
 import { pool } from "../config/db";
 import { runVisualCheck, type VisualBaseline, type VisualCheck } from "../services/visualRunner";
 import { assertProjectAccess } from "../services/authService";
+import { storageService } from "../services/storage/storageService";
 
 const projectParams = z.object({ projectId: z.string().uuid() });
 const idParams = z.object({ id: z.string().uuid() });
 const checkBody = z.object({
-  name: z.string().min(1),
-  path: z.string().startsWith("/").refine((value) => !value.startsWith("//")),
+  name: z.string().trim().min(1),
+  path: z.string().startsWith("/").refine((value) => !value.startsWith("//")).default("/"),
   viewport_width: z.number().int().positive().max(4096).default(1280),
   viewport_height: z.number().int().positive().max(4096).default(720),
   threshold: z.number().min(0).max(1).default(0.01),
 });
 const resultDecisionBody = z.object({ decision: z.enum(["accept_change", "confirm_bug"]) });
 const baselineReviewBody = z.object({ review_status: z.enum(["approved", "rejected"]) });
+const visualArtifactFilename = z.string().regex(/^[A-Za-z0-9._-]+\.png$/);
 
 interface ProjectRow {
   id: string;
@@ -23,7 +25,6 @@ interface ProjectRow {
 
 interface VisualCheckRow extends VisualCheck {
   project_id: string;
-  name: string;
   created_at: Date;
 }
 
@@ -37,7 +38,102 @@ interface VisualRunRow {
   created_at: Date;
 }
 
+async function executeVisualCheck(
+  project: ProjectRow,
+  check: VisualCheckRow,
+  runId: string,
+): Promise<Record<string, unknown>> {
+  const baselineResult = await pool.query<VisualBaseline>(
+    `SELECT id, image_path FROM visual_baselines
+     WHERE check_id = $1 AND status = 'approved'
+     ORDER BY created_at DESC LIMIT 1`,
+    [check.id],
+  );
+  const baseline = baselineResult.rows[0] ?? null;
+  const execution = await runVisualCheck(project.base_url, project.id, check, baseline);
+  let baselineId: string | null = baseline?.id ?? null;
+
+  if (execution.status === "baseline_created" && execution.baselinePath) {
+    const insertedBaseline = await pool.query<{ id: string }>(
+      `INSERT INTO visual_baselines (check_id, image_path, status)
+       VALUES ($1, $2, 'pending') RETURNING id`,
+      [check.id, execution.baselinePath],
+    );
+    baselineId = insertedBaseline.rows[0]?.id ?? null;
+  }
+
+  const reviewStatus = execution.status === "failed" ? "pending" : "none";
+  const inserted = await pool.query(
+    `INSERT INTO visual_results
+       (run_id, check_id, baseline_id, status, diff_ratio, screenshot_path,
+        diff_path, review_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+    [
+      runId,
+      check.id,
+      baselineId,
+      execution.status,
+      execution.diffRatio,
+      execution.screenshotPath,
+      execution.diffPath,
+      reviewStatus,
+    ],
+  );
+  return { ...inserted.rows[0], check_name: check.name, error_message: execution.errorMessage };
+}
+
 const visualRoutes: FastifyPluginAsync = async (fastify) => {
+  fastify.get<{ Params: { filename: string } }>(
+    "/visual-artifacts/:filename",
+    async (request, reply) => {
+      const filename = visualArtifactFilename.safeParse(request.params.filename);
+      if (!filename.success) {
+        return reply.code(400).send({ error: "Invalid visual artifact filename" });
+      }
+
+      const artifactPaths = [
+        `visual/${filename.data}`,
+        `artifacts/${filename.data}`,
+        `artifacts\\${filename.data}`,
+        filename.data,
+      ];
+      const artifact = await pool.query<{ project_id: string; image_path: string }>(
+        `SELECT vc.project_id, vb.image_path
+         FROM visual_baselines vb
+         JOIN visual_checks vc ON vc.id = vb.check_id
+         WHERE vb.image_path = ANY($1::text[])
+         UNION ALL
+         SELECT vc.project_id, vr.screenshot_path AS image_path
+         FROM visual_results vr
+         JOIN visual_checks vc ON vc.id = vr.check_id
+         WHERE vr.screenshot_path = ANY($1::text[])
+         UNION ALL
+         SELECT vc.project_id, vr.diff_path AS image_path
+         FROM visual_results vr
+         JOIN visual_checks vc ON vc.id = vr.check_id
+         WHERE vr.diff_path = ANY($1::text[])
+         LIMIT 1`,
+        [artifactPaths],
+      );
+      const row = artifact.rows[0];
+      if (!row) return reply.code(404).send({ error: "Visual artifact not found" });
+      if (request.user) {
+        await assertProjectAccess(request.user, row.project_id, "viewer");
+      }
+
+      const storageKey = row.image_path.startsWith("visual/")
+        ? row.image_path
+        : filename.data;
+      try {
+        const image = await storageService.download(storageKey);
+        reply.header("Cache-Control", "private, max-age=300");
+        return reply.type("image/png").send(image.buffer);
+      } catch {
+        return reply.code(404).send({ error: "Visual image could not be loaded from artifact storage" });
+      }
+    },
+  );
+
   fastify.post<{ Params: { projectId: string } }>(
     "/projects/:projectId/visual-checks",
     async (request, reply) => {
@@ -109,6 +205,55 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
+  fastify.post<{ Params: { projectId: string; checkId: string } }>(
+    "/projects/:projectId/visual-checks/:checkId/run",
+    async (request, reply) => {
+      const params = z.object({ projectId: z.string().uuid(), checkId: z.string().uuid() })
+        .safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "Invalid projectId or checkId: expected UUIDs" });
+      }
+      if (request.user) {
+        await assertProjectAccess(request.user, params.data.projectId, "qa_engineer");
+      }
+
+      const projectResult = await pool.query<ProjectRow>(
+        "SELECT id, base_url FROM projects WHERE id = $1",
+        [params.data.projectId],
+      );
+      const project = projectResult.rows[0];
+      if (!project) {
+        return reply.code(404).send({ error: "Project not found" });
+      }
+      const checkResult = await pool.query<VisualCheckRow>(
+        "SELECT * FROM visual_checks WHERE id = $1 AND project_id = $2",
+        [params.data.checkId, project.id],
+      );
+      const check = checkResult.rows[0];
+      if (!check) {
+        return reply.code(404).send({ error: "Visual check not found for this project" });
+      }
+
+      const runResult = await pool.query<VisualRunRow>(
+        `INSERT INTO test_runs (id, project_id, status, started_at, run_type)
+         VALUES (gen_random_uuid(), $1, 'running', now(), 'visual') RETURNING *`,
+        [project.id],
+      );
+      const run = runResult.rows[0];
+      if (!run) throw new Error("Failed to create visual run");
+
+      const result = await executeVisualCheck(project, check, run.id);
+      const status = result.status === "failed" ? "failed" : "passed";
+      const updatedRun = await pool.query<VisualRunRow>(
+        "UPDATE test_runs SET status = $1, finished_at = now() WHERE id = $2 RETURNING *",
+        [status, run.id],
+      );
+      const finishedRun = updatedRun.rows[0];
+      if (!finishedRun) throw new Error("Failed to finish visual run");
+      return reply.code(201).send({ ...finishedRun, results: [result] });
+    },
+  );
+
   fastify.post<{ Params: { projectId: string } }>(
     "/projects/:projectId/visual-runs",
     async (request, reply) => {
@@ -141,43 +286,7 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
       );
       const results: Array<Record<string, unknown>> = [];
       for (const check of checks.rows) {
-        const baselineResult = await pool.query<VisualBaseline>(
-          `SELECT id, image_path FROM visual_baselines
-           WHERE check_id = $1 AND status = 'approved'
-           ORDER BY created_at DESC LIMIT 1`,
-          [check.id],
-        );
-        const baseline = baselineResult.rows[0] ?? null;
-        const execution = await runVisualCheck(project.base_url, check, baseline);
-        let baselineId: string | null = baseline?.id ?? null;
-
-        if (execution.status === "baseline_created" && execution.baselinePath) {
-          const insertedBaseline = await pool.query<{ id: string }>(
-            `INSERT INTO visual_baselines (check_id, image_path, status)
-             VALUES ($1, $2, 'pending') RETURNING id`,
-            [check.id, execution.baselinePath],
-          );
-          baselineId = insertedBaseline.rows[0]?.id ?? null;
-        }
-
-        const reviewStatus = execution.status === "failed" ? "pending" : "none";
-        const inserted = await pool.query(
-          `INSERT INTO visual_results
-             (run_id, check_id, baseline_id, status, diff_ratio, screenshot_path,
-              diff_path, review_status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-          [
-            run.id,
-            check.id,
-            baselineId,
-            execution.status,
-            execution.diffRatio,
-            execution.screenshotPath,
-            execution.diffPath,
-            reviewStatus,
-          ],
-        );
-        results.push({ ...inserted.rows[0], check_name: check.name, error_message: execution.errorMessage });
+        results.push(await executeVisualCheck(project, check, run.id));
       }
 
       const status = results.every((result) => result.status !== "failed") ? "passed" : "failed";

@@ -3527,6 +3527,7 @@ function VisualTab({ projectId }: { projectId: string }) {
   const [message, setMessage] = useState("");
   const [results, setResults] = useState<Array<Record<string, unknown>>>([]);
   const [busy, setBusy] = useState(false);
+  const [runningCheckId, setRunningCheckId] = useState<string | null>(null);
 
   async function createCheck(event: FormEvent) {
     event.preventDefault();
@@ -3534,7 +3535,7 @@ function VisualTab({ projectId }: { projectId: string }) {
     try {
       await api(`/projects/${projectId}/visual-checks`, {
         method: "POST",
-        body: JSON.stringify({ name, path }),
+        body: JSON.stringify({ name, path: path.trim() || "/" }),
       });
       setName("");
       setMessage("Visual check created.");
@@ -3564,6 +3565,27 @@ function VisualTab({ projectId }: { projectId: string }) {
     }
   }
 
+  async function runCheck(check: VisualCheck) {
+    setRunningCheckId(check.id);
+    setMessage("");
+    try {
+      const run = await api<{ results: Array<Record<string, unknown>> }>(
+        `/projects/${projectId}/visual-checks/${check.id}/run`,
+        { method: "POST", body: "{}" },
+      );
+      setResults((previous) => [
+        ...previous.filter((result) => result.check_id !== check.id),
+        ...run.results,
+      ]);
+      setMessage(`Visual check "${check.name}" finished.`);
+      reload();
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRunningCheckId(null);
+    }
+  }
+
   async function reviewResult(id: string, decision: "accept_change" | "confirm_bug") {
     try {
       await api(`/visual-results/${id}/review`, { method: "PATCH", body: JSON.stringify({ decision }) });
@@ -3585,15 +3607,25 @@ function VisualTab({ projectId }: { projectId: string }) {
 
   return <div className="tab-content">
     <form className="inline-form" onSubmit={createCheck}>
-      <input required placeholder="Visual check name" value={name} onChange={(event) => setName(event.target.value)} />
-      <input required placeholder="/path" value={path} onChange={(event) => setPath(event.target.value)} />
-      <button disabled={busy}>Create check</button>
-      <button type="button" className="secondary" disabled={busy || !data?.length} onClick={() => void runChecks()}>Run all checks</button>
+      <input required placeholder="Page name (e.g. AI Chat)" value={name} onChange={(event) => setName(event.target.value)} />
+      <input placeholder="Optional route (default: find by page name)" value={path} onChange={(event) => setPath(event.target.value)} />
+      <button disabled={busy || runningCheckId !== null}>Create check</button>
+      <button type="button" className="secondary" disabled={busy || runningCheckId !== null || !data?.length} onClick={() => void runChecks()}>Run all checks</button>
     </form>
     {message && <p className="notice">{message}</p>}
     <State loading={loading} error={error}>
       {(data ?? []).map((check) => <article className="row-card visual-card" key={check.id}>
-        <div><strong>{check.name}</strong><p>{check.path}</p></div>
+        <div className="visual-check-heading">
+          <div><strong>{check.name}</strong><p>{check.path}</p></div>
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy || runningCheckId !== null}
+            onClick={() => void runCheck(check)}
+          >
+            {runningCheckId === check.id ? "Running…" : "Run check"}
+          </button>
+        </div>
         <div className="visual-images">
           {check.baselines.map((baseline) => <div key={baseline.id}>
             <span>Baseline · {baseline.status}</span>
@@ -3625,7 +3657,7 @@ function ArtifactImage({ path }: { path: string }) {
   useEffect(() => {
     let objectUrl = "";
     const filename = path.split(/[\\/]/).pop() ?? "";
-    fetch(`${apiBase}/artifacts/${encodeURIComponent(filename)}`, { credentials: "include" })
+    fetch(`${apiBase}/visual-artifacts/${encodeURIComponent(filename)}`, { credentials: "include" })
       .then((response) => {
         if (!response.ok) throw new Error(`Image request failed (${response.status})`);
         return response.blob();
