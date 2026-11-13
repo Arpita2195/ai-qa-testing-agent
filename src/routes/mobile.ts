@@ -12,6 +12,13 @@ import { writeRunReport } from "../services/runReport";
 import { recordStoredArtifact } from "../services/storage/storageService";
 import { inMemoryMetrics } from "../services/observability/metricsService";
 import { logger } from "../services/observability/logger";
+import { env } from "../config/env";
+import { assertSafeAppiumUrl } from "../services/mobile/appiumClient";
+import {
+  discoverAndroidDevices,
+  resolveMobileDeviceConfiguration,
+  type MobileDeviceConfiguration,
+} from "../services/mobile/deviceRegistry";
 
 const projectParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -22,8 +29,8 @@ const mobileRunBodySchema = z.object({
   include_non_approved: z.boolean().default(false),
   app_package: z.string().min(1).default("com.android.settings"),
   app_activity: z.string().optional(),
-  device_udid: z.string().default("emulator-5554"),
-  platform: z.enum(["android", "ios"]).default("android"),
+  device_udid: z.string().min(1).optional(),
+  platform: z.literal("android").default("android"),
   retries: z.number().int().min(0).max(5).default(1),
   async: z.boolean().default(false),
   steps: z.array(z.string().min(1)).optional(),
@@ -35,15 +42,15 @@ const validateDslBodySchema = z.object({
 
 const registerDeviceBodySchema = z.object({
   name: z.string().min(1).max(100),
-  platform: z.enum(["android", "ios"]).default("android"),
+  platform: z.literal("android").default("android"),
   udid: z.string().min(1).max(100),
   os_version: z.string().max(50).optional(),
-  appium_url: z.string().url().default("http://127.0.0.1:4723"),
+  appium_url: z.string().url().default(env.APPIUM_URL),
 });
 
 const mobileRoutes: FastifyPluginAsync = async (fastify) => {
   // 1. Mobile & Appium Server Status Check
-  fastify.get<{ Params: { projectId: string } }>(
+  fastify.get<{ Params: { projectId: string }; Querystring: { device_udid?: string } }>(
     "/projects/:projectId/mobile/status",
     async (request, reply) => {
       const params = projectParamsSchema.safeParse(request.params);
@@ -55,45 +62,63 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         await assertProjectAccess(request.user, params.data.projectId, "viewer");
       }
 
+      const requestedDeviceUdid = request.query.device_udid;
+      let configuredAppiumUrl = env.APPIUM_URL;
+      if (requestedDeviceUdid) {
+        try {
+          const device = await resolveMobileDeviceConfiguration(params.data.projectId, requestedDeviceUdid);
+          if (!device) throw new Error("No active Android device is registered for this project.");
+          configuredAppiumUrl = device.appiumUrl;
+        } catch (error) {
+          return reply.code(400).send({
+            error: error instanceof Error ? error.message : "Unable to resolve the selected Android device",
+          });
+        }
+      }
+      const appiumUrl = assertSafeAppiumUrl(configuredAppiumUrl);
+      const statusUrl = new URL("status", `${appiumUrl.toString().replace(/\/$/, "")}/`);
       let appiumOnline = false;
       let appiumVersion = "unknown";
       let appiumReady = false;
-
+      let appiumError: string | undefined;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 3000);
-        const res = await fetch("http://127.0.0.1:4723/status", { signal: controller.signal });
-        clearTimeout(timeout);
-        if (res.ok) {
-          const data: any = await res.json();
+        const res = await fetch(statusUrl, { signal: controller.signal });
+        if (!res.ok) {
+          appiumError = `Appium status endpoint returned HTTP ${res.status}.`;
+        } else {
+          const data = await res.json() as { value?: { ready?: boolean; build?: { version?: string } } };
           appiumOnline = true;
           appiumReady = Boolean(data?.value?.ready);
-          appiumVersion = data?.value?.build?.version || "3.9.0";
+          appiumVersion = data?.value?.build?.version || "unknown";
+          if (!appiumReady) appiumError = "Appium is running but is not ready to accept sessions.";
         }
-      } catch {
-        appiumOnline = false;
+      } catch (error) {
+        appiumError = error instanceof Error ? error.message : String(error);
+      } finally {
+        clearTimeout(timeout);
       }
 
+      const discovery = await discoverAndroidDevices();
       return reply.code(200).send({
         appium: {
           online: appiumOnline,
           ready: appiumReady,
           version: appiumVersion,
-          url: "http://127.0.0.1:4723",
+          url: appiumUrl.origin + appiumUrl.pathname.replace(/\/$/, ""),
           driver: "UiAutomator2",
+          ...(appiumError ? { error: appiumError } : {}),
         },
         android: {
-          available: true,
-          defaultDevice: "emulator-5554",
-          defaultModel: "sdk_gphone64_x86_64 (Pixel 7 / Android 17)",
-          status: "connected",
+          available: discovery.devices.some((device) => device.state === "device"),
+          devices: discovery.devices,
+          ...(discovery.error ? { error: discovery.error } : {}),
         },
         ios: {
           available: false,
-          status: "architecture_ready",
-          notice:
-            "iOS test execution architecture is prepared (XCUITestDriver interface). " +
-            "Executing iOS tests requires a macOS host runner with Xcode, CocoaPods, and XCUITest driver.",
+          status: "unsupported",
+          notice: "This mobile workflow currently supports Android devices only.",
         },
       });
     },
@@ -137,29 +162,29 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         await assertProjectAccess(request.user, params.data.projectId, "viewer");
       }
 
-      const devicesRes = await pool.query(
-        "SELECT * FROM mobile_devices WHERE project_id = $1 ORDER BY created_at ASC",
-        [params.data.projectId],
-      );
+      const [devicesRes, discovery] = await Promise.all([
+        pool.query(
+          `SELECT id, project_id, name, platform, udid, os_version, appium_url, is_active, created_at
+           FROM mobile_devices WHERE project_id = $1 ORDER BY created_at ASC`,
+          [params.data.projectId],
+        ),
+        discoverAndroidDevices(),
+      ]);
+      const detectedByUdid = new Map(discovery.devices.map((device) => [device.udid, device]));
+      const devices = devicesRes.rows.map((device) => {
+        const detected = detectedByUdid.get(device.udid);
+        return {
+          ...device,
+          connected: detected?.state === "device",
+          state: detected?.state ?? "not detected",
+          model: detected?.model,
+        };
+      });
 
-      // Return configured devices or default discovered emulator
-      let devices = devicesRes.rows;
-      if (devices.length === 0) {
-        devices = [
-          {
-            id: "00000000-0000-0000-0000-000000000001",
-            project_id: params.data.projectId,
-            name: "Pixel 7 Emulator",
-            platform: "android",
-            udid: "emulator-5554",
-            os_version: "Android 17",
-            appium_url: "http://127.0.0.1:4723",
-            is_active: true,
-          },
-        ];
-      }
-
-      return reply.code(200).send({ devices });
+      return reply.code(200).send({
+        devices,
+        ...(discovery.error ? { discoveryError: discovery.error } : {}),
+      });
     },
   );
 
@@ -183,6 +208,25 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      let appiumUrl: string;
+      try {
+        appiumUrl = assertSafeAppiumUrl(body.data.appium_url).toString().replace(/\/$/, "");
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Invalid local Appium URL",
+        });
+      }
+
+      const existingDevice = await pool.query<{ id: string }>(
+        `SELECT id FROM mobile_devices
+         WHERE project_id = $1 AND platform = 'android' AND udid = $2 AND is_active = TRUE
+         LIMIT 1`,
+        [params.data.projectId, body.data.udid],
+      );
+      if (existingDevice.rowCount) {
+        return reply.code(409).send({ error: "This Android device is already registered and active for this project." });
+      }
+
       const insertRes = await pool.query(
         `INSERT INTO mobile_devices (id, project_id, name, platform, udid, os_version, appium_url, is_active)
          VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, TRUE)
@@ -193,7 +237,7 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
           body.data.platform,
           body.data.udid,
           body.data.os_version || null,
-          body.data.appium_url,
+          appiumUrl,
         ],
       );
 
@@ -230,6 +274,25 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
       }
 
+      let deviceConfiguration: MobileDeviceConfiguration | null;
+      try {
+        deviceConfiguration = await resolveMobileDeviceConfiguration(
+          project.id,
+          body.data.device_udid,
+          body.data.async,
+        );
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Unable to resolve an Android device",
+        });
+      }
+
+      if (!body.data.async && !deviceConfiguration) {
+        return reply.code(400).send({
+          error: "No Android device is configured. Register an active device before running tests.",
+        });
+      }
+
       // If ad-hoc steps provided in request, validate them first
       if (body.data.steps && body.data.steps.length > 0) {
         const val = validateMobileDsl(body.data.steps);
@@ -259,7 +322,7 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         details: {
           runId,
           testCaseId: body.data.test_case_id,
-          deviceUdid: body.data.device_udid,
+          deviceUdid: deviceConfiguration?.udid,
           platform: body.data.platform,
         },
         ipAddress: request.ip,
@@ -278,7 +341,8 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
             includeNonApproved: body.data.include_non_approved,
             appPackage: body.data.app_package,
             appActivity: body.data.app_activity,
-            deviceUdid: body.data.device_udid,
+            deviceUdid: deviceConfiguration?.udid,
+            appiumUrl: deviceConfiguration?.appiumUrl,
             platform: body.data.platform,
             retries: body.data.retries,
           },
@@ -402,7 +466,8 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
               retries: body.data.retries,
               appPackage: effectiveAppPackage,
               appActivity: effectiveAppActivity,
-              deviceUdid: body.data.device_udid,
+              deviceUdid: deviceConfiguration!.udid,
+              appiumUrl: deviceConfiguration!.appiumUrl,
               platform: body.data.platform,
             },
           );
@@ -414,9 +479,9 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
             screenshotPath: null,
             deviceInfo: {
               platform: body.data.platform,
-              deviceName: body.data.device_udid,
+              deviceName: deviceConfiguration?.udid ?? "unconfigured",
               osVersion: "Android",
-              udid: body.data.device_udid,
+              udid: deviceConfiguration?.udid ?? "",
             },
             flaky: false,
             retryCount: 0,
@@ -434,9 +499,9 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
               stepResults: [],
               deviceInfo: {
                 platform: body.data.platform,
-                deviceName: body.data.device_udid,
+                deviceName: deviceConfiguration?.udid ?? "unconfigured",
                 osVersion: "Android",
-                udid: body.data.device_udid,
+                udid: deviceConfiguration?.udid ?? "",
               },
               evidencePath: null,
             },

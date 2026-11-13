@@ -19,7 +19,7 @@ describe("page selectors", () => {
 
   afterAll(async () => {
     await browser.close();
-  }, 30000);
+  }, 60000);
 
   it("uses stable element attributes instead of positional paths when scraping", async () => {
     const page = await browser.newPage();

@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+import { assertSafeAppiumUrl } from "../services/mobile/appiumClient";
 
 dotenv.config();
 
@@ -18,6 +19,19 @@ const envSchema = z.object({
   COOKIE_SECURE: z.enum(["true", "false"]).optional(),
   COOKIE_ALLOW_INSECURE_HTTP: z.enum(["true", "false"]).default("false"),
   ALLOW_PRIVATE_TARGETS: z.string().optional().default("false"),
+  APPIUM_URL: z
+    .string()
+    .url()
+    .default("http://127.0.0.1:4723")
+    .refine((value) => {
+      try {
+        assertSafeAppiumUrl(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }, "APPIUM_URL must use a safe loopback URL"),
+  ANDROID_DEVICE_UDID: z.string().min(1).max(100).optional(),
   CORS_ORIGIN: z.string().optional(),
   STOCKFLOW_BASE_URL: z
     .string()

@@ -16,12 +16,12 @@ async function main() {
     "wait 2000",
     "expect visible text:Apps",
     "tap text:Apps",
-    "wait 1500",
-    "expect visible text:Apps",
+    "wait 2000",
+    "expect visible accessibility id:Navigate up",
     "screenshot",
-    "press back",
-    "wait 1000",
-    "expect visible text:Storage",
+    "tap accessibility id:Navigate up",
+    "wait 2000",
+    "expect visible text:Search Settings",
     "screenshot",
   ];
 

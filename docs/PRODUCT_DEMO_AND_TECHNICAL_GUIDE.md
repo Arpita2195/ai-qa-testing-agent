@@ -81,7 +81,7 @@ Automations are generated from cases and divided into target types:
 
 - **Web:** ordered steps executed by Playwright in a headless Chromium browser.
 - **API:** HTTP method/path, optional headers/body, expected status and response assertions. Multi-step API automation can extract a value from a response and reuse it in a later request.
-- **Mobile:** Android/iOS metadata and mobile DSL steps; execution requires its external device/Appium environment.
+- **Mobile:** Android metadata and mobile DSL steps; execution requires local Android ADB/Appium infrastructure. iOS execution is not available in the current workflow.
 
 Generated instructions can be edited and validated. Web automation accepts a limited command language such as `goto`, `click`, `fill`, `select`, `expect`, `wait`, and `screenshot`; it is not intended to run arbitrary generated JavaScript or shell commands. Run an individual automation to inspect its outcome, or run the approved batch.
 
@@ -97,7 +97,19 @@ Endpoint runs send real HTTP requests to the configured target. POST/PUT/PATCH/D
 
 ### Mobile Testing
 
-This tab reports Appium/driver/device status, lists mobile automations and mobile runs, and supports authoring/validating mobile DSL instructions. A configured Android device/emulator and Appium server are required for an actual run. iOS status is shown separately; real iOS automation also depends on the host/device infrastructure and drivers being installed.
+The Android workflow reports live Appium and ADB status, registers project-scoped devices, selects a device for execution, and supports authoring/validating mobile DSL instructions. A real run requires Android SDK Platform Tools (`adb`) on the backend process `PATH`, an authorized connected device/emulator (`adb devices -l` should show state `device`), Appium with UiAutomator2 installed, and an Appium server reachable from the backend.
+
+Configure `APPIUM_URL` to the local Appium base URL (default `http://127.0.0.1:4723`). Optionally set `ANDROID_DEVICE_UDID` for API/background execution without registering a device; dashboard runs use a project-registered device. Appium URLs are restricted to loopback hosts to prevent server-side request forgery. Keep the backend, Appium server, and ADB device access in the same host/network namespace; the backend Docker image does not include Android SDK/ADB, and a container's `127.0.0.1` is not the host machine. iOS execution is not available in this Android-first workflow.
+
+Typical local setup:
+
+```text
+adb devices -l
+appium driver install uiautomator2
+appium --address 127.0.0.1 --port 4723
+```
+
+In the dashboard, register the UDID shown by ADB with a local Appium URL, select the connected device, and confirm the status panel reports both Appium ready and the device connected before starting a run. Only `admin`/`qa_manager` users can register devices; project QA engineers can create and run approved tests.
 
 ### Suites
 
@@ -325,7 +337,7 @@ Install dependencies with `npm ci` in the repository root and in `dashboard/`. C
 | Screenshots, traces, visual baselines/diffs, reports | Artifact files or configured S3-compatible storage |
 | Session cookie | Browser cookie; server-side token hash/session data in PostgreSQL |
 
-Schema evolution is managed by `database/migrations/001_init.sql` through `015_mobile_testing.sql`. The migration runner records applied migrations so existing databases do not reapply the same migration.
+Schema evolution is managed by the SQL files in `database/migrations/`. The migration runner records applied migrations so existing databases do not reapply the same migration.
 
 ## 10. Known boundaries to explain honestly
 

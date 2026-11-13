@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../../config/db";
+import { env } from "../../config/env";
+import { resolveMobileDeviceConfiguration } from "../mobile/deviceRegistry";
 import { classifyRunStatus, redactSecrets, scrubEvidence } from "../runner";
 import { createApiProjectAuthState } from "../apiRunner";
 import {
@@ -273,9 +275,9 @@ export function initializeJobHandlers(): void {
       retries = 1,
       appPackage = "com.android.settings",
       appActivity,
-      deviceUdid = "emulator-5554",
+      deviceUdid: requestedDeviceUdid,
       platform = "android",
-      appiumUrl = "http://127.0.0.1:4723",
+      appiumUrl: requestedAppiumUrl,
     } = payload;
 
     const projectRes = await pool.query<{ name: string; base_url: string }>(
@@ -284,6 +286,14 @@ export function initializeJobHandlers(): void {
     );
     const project = projectRes.rows[0];
     if (!project) throw new Error(`Project ${projectId} not found`);
+    if (platform !== "android") throw new Error("Mobile background execution currently supports Android only.");
+    const deviceConfiguration = await resolveMobileDeviceConfiguration(
+      projectId,
+      requestedDeviceUdid,
+      true,
+    );
+    const deviceUdid = deviceConfiguration?.udid ?? "";
+    const appiumUrl = deviceConfiguration?.appiumUrl ?? requestedAppiumUrl ?? env.APPIUM_URL;
 
     const testCasesRes = testCaseId
       ? await pool.query<{

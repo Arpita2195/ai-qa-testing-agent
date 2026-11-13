@@ -8,6 +8,7 @@ import {
   type MobileCrashEvidence,
   type MobileDeviceInfo,
   type MobileEvidence,
+  type MobileLocator,
   type MobilePlatform,
   type MobileResultStatus,
   type MobileStepResult,
@@ -71,6 +72,17 @@ export function detectCrashFromLogs(logs: string[], targetPackage?: string): Mob
   return { crashed: false };
 }
 
+export async function isMobileElementNotVisible(
+  driver: Pick<IMobileDriver, "findElements" | "isDisplayed">,
+  locator: MobileLocator,
+): Promise<boolean> {
+  const elements = await driver.findElements(locator);
+  for (const elementId of elements) {
+    if (await driver.isDisplayed(elementId)) return false;
+  }
+  return true;
+}
+
 /**
  * Keycode mappings for Android hardware actions.
  */
@@ -92,8 +104,8 @@ export async function runMobileTestCase(
   const startTime = Date.now();
   const { runId, resultId } = identifiers;
   const platform = options.platform || "android";
-  const appiumUrl = options.appiumUrl || process.env.APPIUM_URL || "http://127.0.0.1:4723";
-  const deviceUdid = options.deviceUdid || process.env.ANDROID_DEVICE_UDID || "emulator-5554";
+  const appiumUrl = options.appiumUrl || env.APPIUM_URL;
+  const deviceUdid = options.deviceUdid || env.ANDROID_DEVICE_UDID || "";
   const appPackage = options.appPackage || "com.android.settings";
   const appActivity =
     options.appActivity ||
@@ -102,9 +114,8 @@ export async function runMobileTestCase(
   const defaultDeviceInfo: MobileDeviceInfo = {
     platform,
     deviceName: deviceUdid,
-    osVersion: "Android 17",
+    osVersion: "unknown",
     udid: deviceUdid,
-    model: "sdk_gphone64_x86_64",
   };
 
   // 1. Validate DSL steps against security whitelist
@@ -120,6 +131,30 @@ export async function runMobileTestCase(
       stepResults: [],
       evidence: {
         status: "failed",
+        durationMs: Date.now() - startTime,
+        failureStep: null,
+        failureStepIndex: null,
+        errorMessage: errorMsg,
+        screenshotPath: null,
+        deviceLogs: [],
+        crashEvidence: { crashed: false },
+        stepResults: [],
+        deviceInfo: defaultDeviceInfo,
+      },
+    };
+  }
+
+  if (platform === "android" && !deviceUdid) {
+    const errorMsg = "No Android device UDID was selected or configured.";
+    return {
+      status: "inconclusive",
+      errorMessage: errorMsg,
+      durationMs: Date.now() - startTime,
+      screenshotPath: null,
+      deviceInfo: defaultDeviceInfo,
+      stepResults: [],
+      evidence: {
+        status: "inconclusive",
         durationMs: Date.now() - startTime,
         failureStep: null,
         failureStepIndex: null,
@@ -275,7 +310,7 @@ export async function runMobileTestCase(
         switch (step.action) {
           case "app launch": {
             const pkg = step.appPackage || appPackage;
-            await driver.launchApp(pkg, step.appActivity);
+            await driver.launchApp(pkg, step.appActivity || appActivity);
             break;
           }
 
@@ -337,16 +372,8 @@ export async function runMobileTestCase(
 
           case "expect not visible": {
             if (!step.locator) throw new Error("Missing selector locator for expect not visible");
-            try {
-              const elements = await driver.findElements(step.locator);
-              if (elements.length > 0) {
-                const visible = await driver.isDisplayed(elements[0]);
-                if (visible) {
-                  throw new Error(`Element "${step.selector}" is unexpectedly visible`);
-                }
-              }
-            } catch (elemErr) {
-              // Element not found is considered not visible, which passes
+            if (!(await isMobileElementNotVisible(driver, step.locator))) {
+              throw new Error(`Element "${step.selector}" is unexpectedly visible`);
             }
             break;
           }

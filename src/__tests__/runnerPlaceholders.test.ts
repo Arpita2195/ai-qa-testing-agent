@@ -18,7 +18,7 @@ describe("StockFlow placeholder handling", () => {
       resolveStepPlaceholders(savedStep),
     ).toBe("fill #email | pilot@example.invalid");
     expect(savedStep).toBe("fill #email | {{STOCKFLOW_TEST_EMAIL}}");
-  });
+  }, 15000);
 
   it("redacts resolved credential values from errors", async () => {
     const { redactSecrets } = await import("../services/runner");

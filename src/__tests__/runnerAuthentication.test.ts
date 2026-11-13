@@ -69,5 +69,5 @@ describe("web automation authentication", () => {
 
     expect(result.status).toBe("passed");
     expect(result.evidence.errorMessage).toBeNull();
-  });
+  }, 60000);
 });

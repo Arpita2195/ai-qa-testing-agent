@@ -13,6 +13,7 @@ import { runMobileTestWithRetries } from "../services/executionManager";
 import { writeRunReport } from "../services/runReport";
 import { assertProjectAccess } from "../services/authService";
 import { logAuditEvent } from "../services/auditLogger";
+import { resolveMobileDeviceConfiguration } from "../services/mobile/deviceRegistry";
 
 const projectParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -654,6 +655,25 @@ const automationRoutes: FastifyPluginAsync = async (fastify) => {
         evidence: execution.evidence,
       });
     } else if (automation.target_type === "mobile") {
+      if (automation.platform && automation.platform !== "android") {
+        return reply.code(400).send({ error: "Mobile execution currently supports Android only." });
+      }
+
+      let deviceConfiguration;
+      try {
+        deviceConfiguration = await resolveMobileDeviceConfiguration(
+          automation.project_id,
+          automation.device_udid ?? undefined,
+        );
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Unable to resolve an Android device",
+        });
+      }
+      if (!deviceConfiguration) {
+        return reply.code(400).send({ error: "No active Android device is registered for this project." });
+      }
+
       // 1. Create Mobile Test Run
       await pool.query(
         `INSERT INTO test_runs
@@ -674,7 +694,8 @@ const automationRoutes: FastifyPluginAsync = async (fastify) => {
           projectId: automation.project_id,
           appPackage: automation.app_package,
           appActivity: automation.app_activity,
-          deviceUdid: automation.device_udid,
+          deviceUdid: deviceConfiguration.udid,
+          appiumUrl: deviceConfiguration.appiumUrl,
           platform: automation.platform || "android",
         },
       );

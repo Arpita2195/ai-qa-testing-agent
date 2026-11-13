@@ -13,7 +13,12 @@ import {
 } from "../services/mobile/mobileDsl";
 import { AppiumClient, MobileDriverError } from "../services/mobile/appiumClient";
 import { XCUITestDriver } from "../services/mobile/iosDriver";
-import { detectCrashFromLogs, runMobileTestCase } from "../services/mobileRunner";
+import {
+  detectCrashFromLogs,
+  isMobileElementNotVisible,
+  runMobileTestCase,
+} from "../services/mobileRunner";
+import { parseAdbDevices } from "../services/mobile/deviceRegistry";
 import { runMobileTestWithRetries } from "../services/executionManager";
 import { enqueueJob, registerJobHandler } from "../services/jobs/jobQueue";
 import { initializeJobHandlers } from "../services/jobs/jobHandlers";
@@ -211,6 +216,13 @@ describe("TASK 15: Android Mobile App Testing Integration", () => {
         /forbidden for security/i,
       );
     });
+
+    it("accepts IPv6 loopback and rejects credentials in Appium URLs", () => {
+      expect(() => new AppiumClient("http://[::1]:4723")).not.toThrow();
+      expect(() => new AppiumClient("http://user:pass@127.0.0.1:4723")).toThrow(
+        /must not contain credentials/i,
+      );
+    });
   });
 
   // 3. iOS Architecture Preparation
@@ -254,6 +266,57 @@ describe("TASK 15: Android Mobile App Testing Integration", () => {
         "11-04 12:00:02.000 D SettingsActivity: Resuming Settings",
       ];
       expect(detectCrashFromLogs(normalLogs).crashed).toBe(false);
+    });
+
+    it("parses actual ADB devices and reports each connection state", () => {
+      const devices = parseAdbDevices(
+        "List of devices attached\r\nemulator-5554 device product:sdk_gphone64_x86_64 model:Pixel_7\r\nR58N123 unauthorized usb:1-1\r\n",
+      );
+      expect(devices).toEqual([
+        {
+          udid: "emulator-5554",
+          state: "device",
+          isEmulator: true,
+          model: "Pixel 7",
+        },
+        {
+          udid: "R58N123",
+          state: "unauthorized",
+          isEmulator: false,
+        },
+      ]);
+    });
+
+    it("does not suppress assertion failures or Appium lookup errors for expect-not-visible", async () => {
+      const locator = { using: "id" as const, value: "login_button" };
+      await expect(
+        isMobileElementNotVisible({
+          findElements: async () => ["element-1"],
+          isDisplayed: async () => true,
+        }, locator),
+      ).resolves.toBe(false);
+      await expect(
+        isMobileElementNotVisible({
+          findElements: async () => [],
+          isDisplayed: async () => false,
+        }, locator),
+      ).resolves.toBe(true);
+      await expect(
+        isMobileElementNotVisible({
+          findElements: async () => ["element-1"],
+          isDisplayed: async () => { throw new Error("Appium transport failed"); },
+        }, locator),
+      ).rejects.toThrow("Appium transport failed");
+    });
+
+    it("reports missing Android device configuration instead of selecting a fake emulator", async () => {
+      const result = await runMobileTestCase(
+        ["wait 1"],
+        { runId: "no-device-run", resultId: "no-device-result" },
+      );
+      expect(result.status).toBe("inconclusive");
+      expect(result.errorMessage).toContain("No Android device UDID");
+      expect(result.deviceInfo.udid).toBe("");
     });
   });
 
@@ -403,6 +466,8 @@ describe("TASK 15: Android Mobile App Testing Integration", () => {
       expect(body).toHaveProperty("android");
       expect(body).toHaveProperty("ios");
       expect(body.appium.driver).toBe("UiAutomator2");
+      expect(body.appium).toHaveProperty("ready");
+      expect(body.android.devices).toBeInstanceOf(Array);
       expect(body.ios.available).toBe(false);
     });
 
@@ -464,6 +529,21 @@ describe("TASK 15: Android Mobile App Testing Integration", () => {
       expect(body.jobId).toBeDefined();
     });
 
+    it("rejects a synchronous run for a device that is not registered to the project", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: `/projects/${testProjectId}/mobile/runs`,
+        headers: {
+          authorization: `Bearer ${engineerToken}`,
+          "content-type": "application/json",
+        },
+        payload: { device_udid: "unregistered-android-device" },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/not registered as an active device/i);
+    });
+
     it("rejects viewers and qa_engineers from registering new mobile devices (requires qa_manager or admin)", async () => {
       const res = await app.inject({
         method: "POST",
@@ -504,6 +584,25 @@ describe("TASK 15: Android Mobile App Testing Integration", () => {
       expect(body.name).toBe("Pixel 7 Production Emulator");
       expect(body.udid).toBe("emulator-5554");
     });
+
+    it("rejects non-loopback Appium URLs during device registration", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: `/projects/${testProjectId}/mobile/devices`,
+        headers: {
+          authorization: `Bearer ${adminToken}`,
+          "content-type": "application/json",
+        },
+        payload: {
+          name: "Remote Android Device",
+          udid: "remote-device",
+          platform: "android",
+          appium_url: "http://169.254.169.254:4723",
+        },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/loopback interface/i);
+    });
   });
 });
-

@@ -22,7 +22,7 @@ export class MobileDriverError extends Error {
  * Validates that the Appium server URL is strictly local and safe.
  * Blocks any attempt to connect to remote untrusted hosts or metadata services.
  */
-function assertSafeAppiumUrl(serverUrl: string): URL {
+export function assertSafeAppiumUrl(serverUrl: string): URL {
   let parsed: URL;
   try {
     parsed = new URL(serverUrl);
@@ -30,7 +30,7 @@ function assertSafeAppiumUrl(serverUrl: string): URL {
     throw new MobileDriverError(`Invalid Appium server URL: ${serverUrl}`, 400, true);
   }
 
-  const hostname = parsed.hostname.toLowerCase();
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const isLocal =
     hostname === "127.0.0.1" ||
     hostname === "localhost" ||
@@ -46,6 +46,14 @@ function assertSafeAppiumUrl(serverUrl: string): URL {
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new MobileDriverError(`Invalid protocol "${parsed.protocol}" for Appium server`, 400, true);
+  }
+
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new MobileDriverError(
+      "Appium server URL must not contain credentials, query parameters, or a fragment",
+      400,
+      true,
+    );
   }
 
   return parsed;
@@ -136,14 +144,19 @@ export class AppiumClient implements IMobileDriver {
   }
 
   public async createSession(caps: MobileCapabilities): Promise<string> {
+    const deviceUdid = caps["appium:udid"] || caps["appium:deviceName"];
+    if (!deviceUdid) {
+      throw new MobileDriverError("An Android device UDID is required to create an Appium session", 400, true);
+    }
+
     this.currentCaps = caps;
     const body = {
       capabilities: {
         alwaysMatch: {
           platformName: caps.platformName || "Android",
           "appium:automationName": caps["appium:automationName"] || "UiAutomator2",
-          "appium:deviceName": caps["appium:deviceName"] || "emulator-5554",
-          "appium:udid": caps["appium:udid"] || "emulator-5554",
+          "appium:deviceName": caps["appium:deviceName"] || deviceUdid,
+          "appium:udid": deviceUdid,
           "appium:noReset": caps["appium:noReset"] ?? true,
           "appium:newCommandTimeout": caps["appium:newCommandTimeout"] ?? 120,
           ...(caps["appium:appPackage"] ? { "appium:appPackage": caps["appium:appPackage"] } : {}),
@@ -158,6 +171,14 @@ export class AppiumClient implements IMobileDriver {
 
     const res = await this.request<{ sessionId: string }>("POST", "/session", body, 60000);
     this._sessionId = res.sessionId;
+
+    // Set implicit wait timeout to allow elements to render during transitions
+    try {
+      await this.request("POST", `/session/${this._sessionId}/timeouts`, { implicit: 5000 });
+    } catch {
+      // Best effort if timeouts endpoint is not supported
+    }
+
     return this._sessionId;
   }
 
@@ -335,20 +356,37 @@ export class AppiumClient implements IMobileDriver {
 
   public async launchApp(appPackage: string, appActivity?: string): Promise<void> {
     const sId = this.assertSession();
+    if (appActivity) {
+      try {
+        await this.request("POST", `/session/${sId}/appium/device/start_activity`, {
+          appPackage,
+          appActivity,
+          stopApp: true,
+        });
+        return;
+      } catch {
+        // Fallback to activate_app
+      }
+    }
+
     try {
+      // First terminate if already running to ensure fresh start
       try {
         await this.request("POST", `/session/${sId}/appium/device/terminate_app`, {
           appId: appPackage,
         });
-      } catch {
-        // Best effort terminate
-      }
+      } catch {}
+
       await this.request("POST", `/session/${sId}/appium/device/activate_app`, {
         appId: appPackage,
       });
     } catch {
       // Fallback for older server commands
-      await this.request("POST", `/session/${sId}/appium/app/launch`);
+      try {
+        await this.request("POST", `/session/${sId}/appium/app/launch`);
+      } catch {
+        // Best effort
+      }
     }
   }
 
@@ -445,4 +483,3 @@ export class AppiumClient implements IMobileDriver {
     }
   }
 }
-

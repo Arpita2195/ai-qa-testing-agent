@@ -4,28 +4,40 @@ import { api, useAuth, type TestCaseAutomation } from "../App";
 
 interface MobileStatusResponse {
   appium: {
-    status: "online" | "offline" | "error";
+    online: boolean;
+    ready: boolean;
     url: string;
-    version?: string;
+    version: string;
+    driver: string;
     error?: string;
   };
-  driver: {
-    name: string;
-    installed: boolean;
-    version?: string;
+  android: {
+    available: boolean;
+    devices: Array<{
+      udid: string;
+      state: string;
+      isEmulator: boolean;
+      model?: string;
+    }>;
+    error?: string;
   };
-  devices: Array<{
-    udid: string;
-    platform: string;
-    state: string;
-    isEmulator: boolean;
-    model?: string;
-  }>;
-  iosSupport: {
+  ios: {
     status: string;
-    platform: string;
-    notes: string;
+    available: boolean;
+    notice: string;
   };
+}
+
+interface RegisteredMobileDevice {
+  id: string;
+  name: string;
+  udid: string;
+  platform: string;
+  appium_url: string;
+  is_active: boolean;
+  connected: boolean;
+  state: string;
+  model?: string;
 }
 
 interface MobileRunResult {
@@ -82,6 +94,12 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
   const [mobileStatus, setMobileStatus] = useState<MobileStatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusError, setStatusError] = useState("");
+  const [devices, setDevices] = useState<RegisteredMobileDevice[]>([]);
+  const [deviceDiscoveryError, setDeviceDiscoveryError] = useState("");
+  const [selectedDeviceUdid, setSelectedDeviceUdid] = useState("");
+  const [deviceName, setDeviceName] = useState("");
+  const [deviceUdid, setDeviceUdid] = useState("");
+  const [deviceAppiumUrl, setDeviceAppiumUrl] = useState("http://127.0.0.1:4723");
 
   // Automations & Test Cases
   const [automations, setAutomations] = useState<TestCaseAutomation[]>([]);
@@ -104,7 +122,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
   const [formTitle, setFormTitle] = useState("");
   const [formPackage, setFormPackage] = useState("com.android.settings");
   const [formActivity, setFormActivity] = useState(".Settings");
-  const [formUdid, setFormUdid] = useState("emulator-5554");
+  const [formUdid, setFormUdid] = useState("");
   const [formSteps, setFormSteps] = useState(DEFAULT_SAMPLE_DSL);
   const [formStatus, setFormStatus] = useState<"draft" | "ready" | "approved">("ready");
   const [validationResult, setValidationResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
@@ -115,13 +133,32 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
   async function loadStatus() {
     try {
       setStatusLoading(true);
-      const res = await api<MobileStatusResponse>(`/projects/${projectId}/mobile/status`);
+      const query = selectedDeviceUdid ? `?device_udid=${encodeURIComponent(selectedDeviceUdid)}` : "";
+      const res = await api<MobileStatusResponse>(`/projects/${projectId}/mobile/status${query}`);
       setMobileStatus(res);
       setStatusError("");
     } catch (err: any) {
       setStatusError(err.message || "Failed to load Appium / Android status");
     } finally {
       setStatusLoading(false);
+    }
+  }
+
+  async function loadDevices() {
+    try {
+      const res = await api<{ devices: RegisteredMobileDevice[]; discoveryError?: string }>(
+        `/projects/${projectId}/mobile/devices`,
+      );
+      setDevices(res.devices || []);
+      setDeviceDiscoveryError(res.discoveryError || "");
+      setSelectedDeviceUdid((current) => {
+        const active = (res.devices || []).filter((device) => device.is_active && device.platform === "android");
+        if (active.some((device) => device.udid === current)) return current;
+        const connected = active.find((device) => device.connected);
+        return connected?.udid || (active.length === 1 ? active[0].udid : "");
+      });
+    } catch (err: any) {
+      setDeviceDiscoveryError(err.message || "Failed to load registered Android devices");
     }
   }
 
@@ -153,9 +190,18 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     loadStatus();
+    loadDevices();
     loadAutomations();
     loadRuns();
   }, [projectId]);
+
+  useEffect(() => {
+    if (selectedDeviceUdid) loadStatus();
+  }, [selectedDeviceUdid]);
+
+  useEffect(() => {
+    if (mobileStatus?.appium.url) setDeviceAppiumUrl(mobileStatus.appium.url);
+  }, [mobileStatus?.appium.url]);
 
   // Validate DSL using server endpoint
   async function handleValidateDsl() {
@@ -189,7 +235,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
     setFormTitle("Android Settings Navigation Smoke Test");
     setFormPackage("com.android.settings");
     setFormActivity(".Settings");
-    setFormUdid("emulator-5554");
+    setFormUdid(selectedDeviceUdid);
     setFormSteps(DEFAULT_SAMPLE_DSL);
     setFormStatus("ready");
     setValidationResult(null);
@@ -203,7 +249,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
     setFormTitle(auto.test_case_title || "Mobile Test Case");
     setFormPackage(auto.app_package || "com.android.settings");
     setFormActivity(auto.app_activity || ".Settings");
-    setFormUdid(auto.device_udid || "emulator-5554");
+    setFormUdid(auto.device_udid || selectedDeviceUdid);
     const steps = auto.mobile_steps && auto.mobile_steps.length > 0
       ? auto.mobile_steps.join("\n")
       : DEFAULT_SAMPLE_DSL;
@@ -260,7 +306,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
               mobile_steps: stepsArray,
               app_package: formPackage,
               app_activity: formActivity,
-              device_udid: formUdid,
+              ...(formUdid ? { device_udid: formUdid } : {}),
               platform: "android",
             }),
           });
@@ -274,7 +320,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
             mobile_steps: stepsArray,
             app_package: formPackage,
             app_activity: formActivity,
-            device_udid: formUdid,
+            ...(formUdid ? { device_udid: formUdid } : {}),
             platform: "android",
           }),
         });
@@ -301,6 +347,30 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
     }
   }
 
+  async function handleRegisterDevice(e: FormEvent) {
+    e.preventDefault();
+    setErrorMessage("");
+    setMessage("");
+    try {
+      const registered = await api<RegisteredMobileDevice>(`/projects/${projectId}/mobile/devices`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: deviceName,
+          udid: deviceUdid,
+          platform: "android",
+          appium_url: deviceAppiumUrl,
+        }),
+      });
+      setDeviceName("");
+      setDeviceUdid("");
+      setSelectedDeviceUdid(registered.udid);
+      setMessage(`Registered Android device "${registered.name}".`);
+      await loadDevices();
+    } catch (err: any) {
+      setErrorMessage(err.message || "Failed to register Android device");
+    }
+  }
+
   // Toggle Human Approval
   async function handleToggleApprove(auto: TestCaseAutomation) {
     const newStatus = auto.status === "approved" ? "ready" : "approved";
@@ -324,8 +394,12 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
 
   // Run single test directly on emulator
   async function handleRunSingle(auto: TestCaseAutomation) {
+    if (!selectedDeviceUdid) {
+      setErrorMessage("Register and select an Android device before running tests.");
+      return;
+    }
     setRunningId(auto.id);
-    setMessage(`Executing "${auto.test_case_title || 'Mobile Test'}" on Android emulator (${auto.device_udid || 'emulator-5554'})...`);
+    setMessage(`Executing "${auto.test_case_title || 'Mobile Test'}" on Android device (${selectedDeviceUdid})...`);
     setErrorMessage("");
 
     try {
@@ -335,7 +409,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
           test_case_id: auto.test_case_id,
           app_package: auto.app_package || undefined,
           app_activity: auto.app_activity || undefined,
-          device_udid: auto.device_udid || "emulator-5554",
+          device_udid: selectedDeviceUdid,
           platform: "android",
           retries: 1,
         }),
@@ -354,6 +428,10 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
 
   // Enqueue test in background queue (PostgreSQL)
   async function handleQueueBackground(auto: TestCaseAutomation) {
+    if (!selectedDeviceUdid) {
+      setErrorMessage("Register and select an Android device before queueing tests.");
+      return;
+    }
     setRunningId(auto.id);
     setMessage(`Queueing mobile test in PostgreSQL background worker queue...`);
     setErrorMessage("");
@@ -367,7 +445,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
             test_case_id: auto.test_case_id,
             app_package: auto.app_package || undefined,
             app_activity: auto.app_activity || undefined,
-            device_udid: auto.device_udid || "emulator-5554",
+            device_udid: selectedDeviceUdid,
             platform: "android",
             async: true,
           }),
@@ -385,8 +463,12 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
 
   // Run all approved mobile tests
   async function handleRunAllApproved() {
+    if (!selectedDeviceUdid) {
+      setErrorMessage("Register and select an Android device before running tests.");
+      return;
+    }
     setBatchRunning(true);
-    setMessage("Executing all approved mobile tests on Android emulator...");
+    setMessage(`Executing all approved mobile tests on Android device (${selectedDeviceUdid})...`);
     setErrorMessage("");
 
     try {
@@ -394,7 +476,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
         method: "POST",
         body: JSON.stringify({
           platform: "android",
-          device_udid: "emulator-5554",
+          device_udid: selectedDeviceUdid,
           retries: 1,
         }),
       });
@@ -417,6 +499,11 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
 
   const approvedCount = automations.filter((a) => a.status === "approved").length;
   const canEdit = user?.role === "admin" || user?.role === "qa_manager" || user?.role === "qa_engineer";
+  const canManageDevices = user?.role === "admin" || user?.role === "qa_manager";
+  const selectedDevice = devices.find((device) => device.udid === selectedDeviceUdid && device.is_active);
+  const canExecuteMobile = Boolean(
+    selectedDevice?.connected && mobileStatus?.appium.online && mobileStatus.appium.ready,
+  );
 
   return (
     <div style={{ marginTop: "16px" }}>
@@ -429,54 +516,123 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
         <div className="card" style={{ padding: "14px", borderLeft: "4px solid #0284c7" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <strong style={{ fontSize: "0.95rem" }}>🚀 Appium Server</strong>
-            <span className={`badge ${mobileStatus?.appium.status === "online" ? "passed" : "failed"}`}>
-              {mobileStatus?.appium.status === "online" ? "● Connected" : "○ Disconnected"}
+            <span className={`badge ${mobileStatus?.appium.ready ? "passed" : "failed"}`}>
+              {mobileStatus?.appium.ready ? "● Ready" : mobileStatus?.appium.online ? "○ Not ready" : "○ Offline"}
             </span>
           </div>
           <div style={{ fontSize: "0.82rem", color: "#64748b", marginTop: "6px" }}>
             <div><strong>Endpoint:</strong> <code>{mobileStatus?.appium.url || "http://127.0.0.1:4723"}</code></div>
-            <div><strong>Driver:</strong> {mobileStatus?.driver.name || "UiAutomator2"} {mobileStatus?.driver.version ? `v${mobileStatus.driver.version}` : "(installed)"}</div>
-            <div><strong>Loopback Guard:</strong> <span style={{ color: "#16a34a" }}>Active (Strict 127.0.0.1)</span></div>
+            <div><strong>Required driver:</strong> {mobileStatus?.appium.driver || "UiAutomator2"}</div>
+            {mobileStatus?.appium.version && <div><strong>Appium version:</strong> {mobileStatus.appium.version}</div>}
+            {mobileStatus?.appium.error && <div style={{ color: "#b91c1c" }}>{mobileStatus.appium.error}</div>}
           </div>
         </div>
 
         {/* Android Device Status */}
         <div className="card" style={{ padding: "14px", borderLeft: "4px solid #16a34a" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <strong style={{ fontSize: "0.95rem" }}>📱 Android Emulator</strong>
-            <span className="badge passed">
-              {mobileStatus?.devices && mobileStatus.devices.length > 0 ? "● Device Ready" : "○ Waiting"}
+            <strong style={{ fontSize: "0.95rem" }}>📱 Android Devices</strong>
+            <span className={`badge ${mobileStatus?.android.available ? "passed" : "failed"}`}>
+              {mobileStatus?.android.available ? "● Connected" : "○ No device"}
             </span>
           </div>
           <div style={{ fontSize: "0.82rem", color: "#64748b", marginTop: "6px" }}>
-            {mobileStatus?.devices && mobileStatus.devices.length > 0 ? (
-              <>
-                <div><strong>UDID:</strong> <code>{mobileStatus.devices[0].udid}</code></div>
-                <div><strong>Model:</strong> Pixel 7 (Android 17 / API 35)</div>
-                <div><strong>State:</strong> {mobileStatus.devices[0].state} (Ready for touches)</div>
-              </>
+            {mobileStatus?.android.devices.length ? (
+              mobileStatus.android.devices.map((device) => (
+                <div key={device.udid}>
+                  <code>{device.udid}</code> · {device.state}{device.model ? ` · ${device.model}` : ""}
+                </div>
+              ))
             ) : (
-              <div>No ADB devices detected. Start emulator: <code>emulator -avd Pixel_7</code></div>
+              <div>No connected Android devices were discovered.</div>
+            )}
+            {(mobileStatus?.android.error || deviceDiscoveryError) && (
+              <div style={{ color: "#b91c1c", marginTop: "4px" }}>
+                {mobileStatus?.android.error || deviceDiscoveryError}
+              </div>
             )}
           </div>
         </div>
 
-        {/* iOS Architecture Readiness */}
+        {/* iOS is intentionally not part of this Android workflow */}
         <div className="card" style={{ padding: "14px", borderLeft: "4px solid #8b5cf6" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <strong style={{ fontSize: "0.95rem" }}>🍎 iOS Architecture</strong>
-            <span className="badge" style={{ background: "#ede9fe", color: "#6d28d9" }}>
-              Architecture Ready
+            <strong style={{ fontSize: "0.95rem" }}>🍎 iOS Testing</strong>
+            <span className="badge failed">
+              Not available
             </span>
           </div>
           <div style={{ fontSize: "0.82rem", color: "#64748b", marginTop: "6px" }}>
-            <div><strong>Driver Interface:</strong> <code>IMobileDriver (XCUITestDriver)</code></div>
-            <div><strong>Platform:</strong> iOS / iPadOS Simulator</div>
-            <div style={{ fontSize: "0.78rem", color: "#7c3aed" }}>
-              Ready for macOS hosts with Xcode & xcuitest driver.
-            </div>
+            {mobileStatus?.ios.notice || "This workflow currently supports Android devices only."}
           </div>
         </div>
+      </div>
+
+      <div className="card" style={{ padding: "14px", marginBottom: "20px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: "14px", alignItems: "end" }}>
+          <div>
+            <label htmlFor="mobile-device-select" style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
+              Active project device
+            </label>
+            <select
+              id="mobile-device-select"
+              value={selectedDeviceUdid}
+              onChange={(e) => setSelectedDeviceUdid(e.target.value)}
+              style={{ width: "100%" }}
+            >
+              <option value="">Select a registered Android device</option>
+              {devices.filter((device) => device.is_active && device.platform === "android").map((device) => (
+                <option key={device.id} value={device.udid}>
+                  {device.name} ({device.udid}) · {device.connected ? "connected" : device.state}
+                </option>
+              ))}
+            </select>
+            {selectedDevice && (
+              <div style={{ fontSize: "0.78rem", color: selectedDevice.connected ? "#15803d" : "#b91c1c", marginTop: "4px" }}>
+                {selectedDevice.connected ? "ADB device is connected." : `Device is not connected (${selectedDevice.state}).`}
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize: "0.82rem", color: "#64748b" }}>
+            {canExecuteMobile
+              ? "Appium is ready and the selected device is connected."
+              : "Execution requires a ready Appium server and a connected, registered device."}
+          </div>
+        </div>
+
+        {canManageDevices && (
+          <form onSubmit={handleRegisterDevice} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "8px", marginTop: "12px", alignItems: "end" }}>
+            <input
+              aria-label="Device name"
+              required
+              value={deviceName}
+              onChange={(e) => setDeviceName(e.target.value)}
+              placeholder="Device name"
+            />
+            <input
+              aria-label="Android device UDID"
+              required
+              value={deviceUdid}
+              onChange={(e) => setDeviceUdid(e.target.value)}
+              placeholder="Android device UDID"
+              list="discovered-android-devices"
+            />
+            <datalist id="discovered-android-devices">
+              {mobileStatus?.android.devices.filter((device) => device.state === "device").map((device) => (
+                <option key={device.udid} value={device.udid}>{device.model || device.udid}</option>
+              ))}
+            </datalist>
+            <input
+              aria-label="Local Appium URL"
+              required
+              type="url"
+              value={deviceAppiumUrl}
+              onChange={(e) => setDeviceAppiumUrl(e.target.value)}
+              placeholder="http://127.0.0.1:4723"
+            />
+            <button type="submit">Register device</button>
+          </form>
+        )}
       </div>
 
       {/* Notifications / Messages */}
@@ -503,11 +659,11 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
             type="button"
             className="secondary"
             onClick={handleRunAllApproved}
-            disabled={batchRunning || approvedCount === 0}
+            disabled={batchRunning || approvedCount === 0 || !canExecuteMobile}
           >
-            {batchRunning ? "Executing Approved..." : `▶ Run Approved on Emulator (${approvedCount})`}
+            {batchRunning ? "Executing Approved..." : `▶ Run Approved Tests (${approvedCount})`}
           </button>
-          <button type="button" className="secondary" onClick={() => { loadStatus(); loadAutomations(); loadRuns(); }}>
+          <button type="button" className="secondary" onClick={() => { loadStatus(); loadDevices(); loadAutomations(); loadRuns(); }}>
             🔄 Refresh
           </button>
         </div>
@@ -538,7 +694,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
             No mobile test cases found{filterStatus !== "all" ? ` with status "${filterStatus}"` : ""}.
           </p>
           <p style={{ fontSize: "0.85rem", color: "#94a3b8", margin: "6px 0 14px" }}>
-            Create an Appium test case using the restricted Mobile Testing DSL to run on the Pixel 7 emulator.
+            Create an Appium test case using the restricted Mobile Testing DSL for a registered Android device.
           </p>
           <button type="button" onClick={handleOpenCreate}>
             Create First Mobile Test Case
@@ -582,7 +738,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
                     <span style={{ margin: "0 8px" }}>·</span>
                     <span><strong>Activity:</strong> <code>{auto.app_activity || ".Settings"}</code></span>
                     <span style={{ margin: "0 8px" }}>·</span>
-                    <span><strong>Device:</strong> <code>{auto.device_udid || "emulator-5554"}</code></span>
+                    <span><strong>Preferred device:</strong> <code>{auto.device_udid || "Use selected project device"}</code></span>
                   </div>
 
                   {/* DSL Steps Preview */}
@@ -612,9 +768,9 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
                     type="button"
                     style={{ width: "100%", fontSize: "0.82rem", padding: "6px 10px" }}
                     onClick={() => handleRunSingle(auto)}
-                    disabled={isRunning || batchRunning}
+                    disabled={isRunning || batchRunning || !canExecuteMobile}
                   >
-                    {isRunning ? "Executing..." : "▶ Run on Emulator"}
+                    {isRunning ? "Executing..." : "▶ Run on Device"}
                   </button>
 
                   <button
@@ -622,7 +778,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
                     className="secondary"
                     style={{ width: "100%", fontSize: "0.82rem", padding: "6px 10px" }}
                     onClick={() => handleQueueBackground(auto)}
-                    disabled={isRunning || batchRunning}
+                    disabled={isRunning || batchRunning || !canExecuteMobile}
                   >
                     ⏳ Queue (Postgres)
                   </button>
@@ -661,7 +817,6 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
             <thead>
               <tr>
                 <th>Run ID</th>
-                <th>Target Device</th>
                 <th>Status</th>
                 <th>Passed / Total</th>
                 <th>Flaky</th>
@@ -676,11 +831,6 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
                     <Link to={`/runs/${run.id}`} style={{ fontWeight: 600, color: "#0284c7" }}>
                       #{run.id.slice(0, 8)}
                     </Link>
-                  </td>
-                  <td>
-                    <span style={{ fontSize: "0.82rem", color: "#334155" }}>
-                      emulator-5554 (Android 17)
-                    </span>
                   </td>
                   <td>
                     <span className={`badge ${run.status}`}>
@@ -768,16 +918,18 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
 
                   <div>
                     <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
-                      Device UDID
+                      Preferred project device
                     </label>
-                    <input
-                      type="text"
-                      required
+                    <select
                       value={formUdid}
                       onChange={(e) => setFormUdid(e.target.value)}
-                      placeholder="emulator-5554"
                       style={{ width: "100%", fontSize: "0.85rem" }}
-                    />
+                    >
+                      <option value="">Use selected project device</option>
+                      {devices.filter((device) => device.is_active && device.platform === "android").map((device) => (
+                        <option key={device.id} value={device.udid}>{device.name} ({device.udid})</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
 
