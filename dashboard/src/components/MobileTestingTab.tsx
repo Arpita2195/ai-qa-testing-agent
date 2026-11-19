@@ -9,16 +9,21 @@ interface MobileStatusResponse {
     url: string;
     version: string;
     driver: string;
+    isRemote?: boolean;
     error?: string;
   };
   android: {
     available: boolean;
+    hasRegisteredDevice?: boolean;
     devices: Array<{
       udid: string;
       state: string;
       isEmulator: boolean;
       model?: string;
     }>;
+    isRemote?: boolean;
+    remoteReady?: boolean;
+    discoverySource?: string;
     error?: string;
   };
   ios: {
@@ -37,7 +42,9 @@ interface RegisteredMobileDevice {
   is_active: boolean;
   connected: boolean;
   state: string;
+  discoverySource?: string;
   model?: string;
+  verified?: boolean;
 }
 
 interface MobileRunResult {
@@ -136,6 +143,9 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
       const query = selectedDeviceUdid ? `?device_udid=${encodeURIComponent(selectedDeviceUdid)}` : "";
       const res = await api<MobileStatusResponse>(`/projects/${projectId}/mobile/status${query}`);
       setMobileStatus(res);
+      if (res?.appium?.url) {
+        setDeviceAppiumUrl((prev) => (prev === "http://127.0.0.1:4723" ? res.appium.url : prev));
+      }
       setStatusError("");
     } catch (err: any) {
       setStatusError(err.message || "Failed to load Appium / Android status");
@@ -146,7 +156,7 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
 
   async function loadDevices() {
     try {
-      const res = await api<{ devices: RegisteredMobileDevice[]; discoveryError?: string }>(
+      const res = await api<{ devices: RegisteredMobileDevice[]; isRemote?: boolean; discoveryError?: string }>(
         `/projects/${projectId}/mobile/devices`,
       );
       setDevices(res.devices || []);
@@ -154,8 +164,8 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
       setSelectedDeviceUdid((current) => {
         const active = (res.devices || []).filter((device) => device.is_active && device.platform === "android");
         if (active.some((device) => device.udid === current)) return current;
-        const connected = active.find((device) => device.connected);
-        return connected?.udid || (active.length === 1 ? active[0].udid : "");
+        const connected = active.find((device) => device.connected || device.verified);
+        return connected?.udid || (active.length > 0 ? active[0].udid : "");
       });
     } catch (err: any) {
       setDeviceDiscoveryError(err.message || "Failed to load registered Android devices");
@@ -500,9 +510,13 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
   const approvedCount = automations.filter((a) => a.status === "approved").length;
   const canEdit = user?.role === "admin" || user?.role === "qa_manager" || user?.role === "qa_engineer";
   const canManageDevices = user?.role === "admin" || user?.role === "qa_manager";
+  const isRemote = Boolean(mobileStatus?.appium.isRemote);
   const selectedDevice = devices.find((device) => device.udid === selectedDeviceUdid && device.is_active);
+  const isDeviceReady = Boolean(
+    selectedDevice && (isRemote ? selectedDevice.is_active : selectedDevice.connected),
+  );
   const canExecuteMobile = Boolean(
-    selectedDevice?.connected && mobileStatus?.appium.online && mobileStatus.appium.ready,
+    isDeviceReady && mobileStatus?.appium.online && mobileStatus.appium.ready,
   );
 
   return (
@@ -515,7 +529,14 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
         {/* Appium Server Status */}
         <div className="card" style={{ padding: "14px", borderLeft: "4px solid #0284c7" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <strong style={{ fontSize: "0.95rem" }}>🚀 Appium Server</strong>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <strong style={{ fontSize: "0.95rem" }}>🚀 Appium Server</strong>
+              {isRemote && (
+                <span className="badge" style={{ fontSize: "0.7rem", background: "#f1f5f9", color: "#0369a1", border: "1px solid #bae6fd" }}>
+                  Remote Bridge
+                </span>
+              )}
+            </div>
             <span className={`badge ${mobileStatus?.appium.ready ? "passed" : "failed"}`}>
               {mobileStatus?.appium.ready ? "● Ready" : mobileStatus?.appium.online ? "○ Not ready" : "○ Offline"}
             </span>
@@ -533,7 +554,9 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <strong style={{ fontSize: "0.95rem" }}>📱 Android Devices</strong>
             <span className={`badge ${mobileStatus?.android.available ? "passed" : "failed"}`}>
-              {mobileStatus?.android.available ? "● Connected" : "○ No device"}
+              {mobileStatus?.android.available
+                ? (isRemote && !mobileStatus.android.devices.length ? "● Remote Ready" : "● Connected")
+                : "○ No device"}
             </span>
           </div>
           <div style={{ fontSize: "0.82rem", color: "#64748b", marginTop: "6px" }}>
@@ -543,10 +566,30 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
                   <code>{device.udid}</code> · {device.state}{device.model ? ` · ${device.model}` : ""}
                 </div>
               ))
+            ) : isRemote && mobileStatus?.appium.ready && mobileStatus?.android.hasRegisteredDevice ? (
+              <div>
+                <div><strong>Discovery mode:</strong> Remote Appium bridge</div>
+                <div style={{ marginTop: "2px" }}>
+                  {selectedDevice ? (
+                    <>Active device: <code>{selectedDevice.udid}</code> ({selectedDevice.state})</>
+                  ) : (
+                    <span>No active device selected</span>
+                  )}
+                </div>
+                <div style={{ marginTop: "2px", color: selectedDevice?.verified ? "#059669" : "#0284c7" }}>
+                  {selectedDevice?.verified
+                    ? "Verified with remote Appium session."
+                    : "Device registered. Session will be verified through Appium upon execution."}
+                </div>
+              </div>
+            ) : isRemote && !mobileStatus?.android.hasRegisteredDevice ? (
+              <div>No active Android device is registered for this project. Register a device below.</div>
+            ) : isRemote && !mobileStatus?.appium.ready ? (
+              <div>Remote Appium server is offline or not ready. Verify SSH tunnel and local Appium daemon.</div>
             ) : (
               <div>No connected Android devices were discovered.</div>
             )}
-            {(mobileStatus?.android.error || deviceDiscoveryError) && (
+            {!isRemote && (mobileStatus?.android.error || deviceDiscoveryError) && (
               <div style={{ color: "#b91c1c", marginTop: "4px" }}>
                 {mobileStatus?.android.error || deviceDiscoveryError}
               </div>
@@ -581,22 +624,46 @@ export function MobileTestingTab({ projectId }: { projectId: string }) {
               style={{ width: "100%" }}
             >
               <option value="">Select a registered Android device</option>
-              {devices.filter((device) => device.is_active && device.platform === "android").map((device) => (
-                <option key={device.id} value={device.udid}>
-                  {device.name} ({device.udid}) · {device.connected ? "connected" : device.state}
-                </option>
-              ))}
+              {devices.filter((device) => device.is_active && device.platform === "android").map((device) => {
+                const statusLabel =
+                  device.discoverySource === "local_adb"
+                    ? "connected (ADB)"
+                    : isRemote
+                    ? (device.verified
+                        ? "verified (remote Appium)"
+                        : mobileStatus?.appium.ready
+                        ? "registered (unverified on remote Appium)"
+                        : "remote Appium offline")
+                    : device.state;
+                return (
+                  <option key={device.id} value={device.udid}>
+                    {device.name} ({device.udid}) · {statusLabel}
+                  </option>
+                );
+              })}
             </select>
             {selectedDevice && (
-              <div style={{ fontSize: "0.78rem", color: selectedDevice.connected ? "#15803d" : "#b91c1c", marginTop: "4px" }}>
-                {selectedDevice.connected ? "ADB device is connected." : `Device is not connected (${selectedDevice.state}).`}
+              <div style={{ fontSize: "0.78rem", color: canExecuteMobile ? "#15803d" : "#b91c1c", marginTop: "4px" }}>
+                {isRemote
+                  ? (mobileStatus?.appium.ready
+                      ? (selectedDevice.verified
+                          ? `Remote execution ready: device "${selectedDevice.name}" is verified on remote Appium.`
+                          : `Remote execution ready: device "${selectedDevice.name}" will be verified and controlled by Appium upon execution.`)
+                      : "Remote Appium server is offline. Verify SSH tunnel and local Appium daemon.")
+                  : (selectedDevice.connected
+                      ? "ADB device is connected."
+                      : `Device is not connected (${selectedDevice.state}).`)}
               </div>
             )}
           </div>
           <div style={{ fontSize: "0.82rem", color: "#64748b" }}>
             {canExecuteMobile
-              ? "Appium is ready and the selected device is connected."
-              : "Execution requires a ready Appium server and a connected, registered device."}
+              ? (isRemote
+                  ? "Trusted remote Appium is ready. Execution will target the selected remote device."
+                  : "Appium is ready and the selected device is connected.")
+              : (isRemote
+                  ? "Execution requires a ready Appium server and a registered device."
+                  : "Execution requires a ready Appium server and a connected, registered device.")}
           </div>
         </div>
 

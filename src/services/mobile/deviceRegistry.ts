@@ -85,21 +85,18 @@ export async function resolveMobileDeviceConfiguration(
 
   const registeredDevice = result.rows[0];
   if (registeredDevice) {
-    const appiumUrl = assertSafeAppiumUrl(registeredDevice.appium_url).toString().replace(/\/$/, "");
+    // If an explicit trusted remote Appium URL is configured for the environment (e.g. in AWS Docker container),
+    // the backend connects to that configured server so that all execution targets the reachable endpoint.
+    // Otherwise, validate the device's registered Appium URL.
+    const targetAppiumUrl = env.APPIUM_TRUSTED_REMOTE_URL
+      ? env.APPIUM_URL
+      : registeredDevice.appium_url || env.APPIUM_URL;
+    const appiumUrl = assertSafeAppiumUrl(targetAppiumUrl, env.APPIUM_TRUSTED_REMOTE_URL).toString().replace(/\/$/, "");
     return { udid: registeredDevice.udid, appiumUrl };
   }
 
   if (requestedUdid) {
-    if (env.ANDROID_DEVICE_UDID === requestedUdid) {
-      const appiumUrl = assertSafeAppiumUrl(env.APPIUM_URL).toString().replace(/\/$/, "");
-      return { udid: requestedUdid, appiumUrl };
-    }
     throw new Error(`Android device "${requestedUdid}" is not registered as an active device for this project.`);
-  }
-
-  if (env.ANDROID_DEVICE_UDID) {
-    const appiumUrl = assertSafeAppiumUrl(env.APPIUM_URL).toString().replace(/\/$/, "");
-    return { udid: env.ANDROID_DEVICE_UDID, appiumUrl };
   }
 
   if (allowMissing) return null;

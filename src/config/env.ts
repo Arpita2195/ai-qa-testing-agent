@@ -1,10 +1,10 @@
 import dotenv from "dotenv";
 import { z } from "zod";
-import { assertSafeAppiumUrl } from "../services/mobile/appiumClient";
+import { assertSafeAppiumUrl, validateTrustedRemoteAppiumUrl } from "../services/mobile/appiumClient";
 
 dotenv.config();
 
-const envSchema = z.object({
+export const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
@@ -22,15 +22,19 @@ const envSchema = z.object({
   APPIUM_URL: z
     .string()
     .url()
-    .default("http://127.0.0.1:4723")
-    .refine((value) => {
-      try {
-        assertSafeAppiumUrl(value);
-        return true;
-      } catch {
-        return false;
+    .default("http://127.0.0.1:4723"),
+  APPIUM_TRUSTED_REMOTE_URL: z.preprocess(
+    (val) => {
+      if (typeof val === "string") {
+        const trimmed = val.trim();
+        return trimmed === "" ? undefined : trimmed;
       }
-    }, "APPIUM_URL must use a safe loopback URL"),
+      return val;
+    },
+    z.string().url().optional(),
+  ),
+  APPIUM_ALLOW_DOCKER_HOST: z.enum(["true", "false"]).default("false"),
+  ADB_SERVER_SOCKET: z.string().optional(),
   ANDROID_DEVICE_UDID: z.string().min(1).max(100).optional(),
   CORS_ORIGIN: z.string().optional(),
   STOCKFLOW_BASE_URL: z
@@ -54,6 +58,40 @@ const envSchema = z.object({
   USE_REDIS_QUEUE: z.string().optional().default("false"),
   // Logging & Observability
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+}).superRefine((data, ctx) => {
+  if (data.APPIUM_TRUSTED_REMOTE_URL) {
+    try {
+      validateTrustedRemoteAppiumUrl(data.APPIUM_TRUSTED_REMOTE_URL);
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid APPIUM_TRUSTED_REMOTE_URL: ${err instanceof Error ? err.message : String(err)}`,
+        path: ["APPIUM_TRUSTED_REMOTE_URL"],
+      });
+    }
+  }
+
+  try {
+    assertSafeAppiumUrl(data.APPIUM_URL, data.APPIUM_TRUSTED_REMOTE_URL);
+  } catch (err) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Invalid APPIUM_URL: ${err instanceof Error ? err.message : String(err)}`,
+      path: ["APPIUM_URL"],
+    });
+  }
+
+  // When APPIUM_TRUSTED_REMOTE_URL is configured, APPIUM_URL and APPIUM_TRUSTED_REMOTE_URL must be configured consistently
+  if (
+    data.APPIUM_TRUSTED_REMOTE_URL &&
+    data.APPIUM_URL.replace(/\/$/, "") !== data.APPIUM_TRUSTED_REMOTE_URL.replace(/\/$/, "")
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `APPIUM_URL (${data.APPIUM_URL}) must match APPIUM_TRUSTED_REMOTE_URL (${data.APPIUM_TRUSTED_REMOTE_URL}) when remote execution mode is configured.`,
+      path: ["APPIUM_URL"],
+    });
+  }
 });
 
 const result = envSchema.safeParse(process.env);
@@ -86,6 +124,11 @@ if (process.env.NODE_ENV === "production") {
   if (result.data.ALLOW_PRIVATE_TARGETS === "true") {
     console.warn(
       "[SECURITY WARNING] ALLOW_PRIVATE_TARGETS is set to 'true' in production. This allows requests to internal/private targets and weakens SSRF protection.",
+    );
+  }
+  if (result.data.APPIUM_ALLOW_DOCKER_HOST === "true") {
+    console.warn(
+      "[SECURITY WARNING] APPIUM_ALLOW_DOCKER_HOST is enabled in production. Host-level Docker bridge access via host.docker.internal must be disabled in production; use APPIUM_TRUSTED_REMOTE_URL for authorized remote Appium endpoints.",
     );
   }
 }

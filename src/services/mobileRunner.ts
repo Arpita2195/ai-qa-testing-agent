@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { AppiumClient, MobileDriverError } from "./mobile/appiumClient";
+import { AppiumClient, MobileDriverError, assertSafeAppiumUrl } from "./mobile/appiumClient";
 import { XCUITestDriver } from "./mobile/iosDriver";
 import {
   type IMobileDriver,
@@ -168,6 +168,34 @@ export async function runMobileTestCase(
     };
   }
 
+  // 2. Validate Appium server URL against security policy
+  let validatedAppiumUrl: string;
+  try {
+    validatedAppiumUrl = assertSafeAppiumUrl(appiumUrl, env.APPIUM_TRUSTED_REMOTE_URL).toString().replace(/\/$/, "");
+  } catch (urlErr) {
+    const errorMsg = `Invalid or untrusted Appium URL: ${urlErr instanceof Error ? urlErr.message : String(urlErr)}`;
+    return {
+      status: "inconclusive",
+      errorMessage: errorMsg,
+      durationMs: Date.now() - startTime,
+      screenshotPath: null,
+      deviceInfo: defaultDeviceInfo,
+      stepResults: [],
+      evidence: {
+        status: "inconclusive",
+        durationMs: Date.now() - startTime,
+        failureStep: null,
+        failureStepIndex: null,
+        errorMessage: errorMsg,
+        screenshotPath: null,
+        deviceLogs: [],
+        crashEvidence: { crashed: false },
+        stepResults: [],
+        deviceInfo: defaultDeviceInfo,
+      },
+    };
+  }
+
   // 2. Fetch project credentials for placeholder replacement if available
   let credentials: AppCredentials | undefined;
   if (options.projectId) {
@@ -230,7 +258,7 @@ export async function runMobileTestCase(
     }
   }
 
-  const driver: IMobileDriver = new AppiumClient(appiumUrl);
+  const driver: IMobileDriver = new AppiumClient(validatedAppiumUrl, env.APPIUM_TRUSTED_REMOTE_URL);
   let sessionCreated = false;
   let screenshotPath: string | null = null;
   let failureStep: string | null = null;
@@ -245,7 +273,7 @@ export async function runMobileTestCase(
   const artifactDir = path.resolve(__dirname, "../../artifacts/runs", runId, resultId);
   const screenshotFileName = "screenshot.png";
   const fullScreenshotPath = path.join(artifactDir, screenshotFileName);
-  const relativeScreenshotPath = path.join("artifacts", "runs", runId, resultId, screenshotFileName);
+  const relativeScreenshotPath = path.posix.join("artifacts", "runs", runId, resultId, screenshotFileName);
 
   try {
     // 4. Initialize session with Appium & UiAutomator2
@@ -515,7 +543,7 @@ export async function runMobileTestCase(
     crashEvidence,
     stepResults,
     deviceInfo,
-    evidencePath: path.join("artifacts", "runs", runId, resultId, "evidence.json"),
+    evidencePath: path.posix.join("artifacts", "runs", runId, resultId, "evidence.json"),
   };
 
   try {

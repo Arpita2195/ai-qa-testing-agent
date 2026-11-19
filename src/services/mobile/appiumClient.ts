@@ -19,15 +19,116 @@ export class MobileDriverError extends Error {
 }
 
 /**
- * Validates that the Appium server URL is strictly local and safe.
- * Blocks any attempt to connect to remote untrusted hosts or metadata services.
+ * Strictly validates an explicitly configured trusted remote Appium endpoint.
+ * For AWS remote deployment, only the dedicated Docker bridge endpoint is permitted:
+ * http://172.18.0.1:4724 (normalized path "/").
+ * Arbitrary public IPs, external hostnames, other private network addresses, credentials,
+ * query strings, fragments, and subpaths are strictly rejected.
  */
-export function assertSafeAppiumUrl(serverUrl: string): URL {
+export function validateTrustedRemoteAppiumUrl(trustedUrl: string): URL {
+  if (!trustedUrl || typeof trustedUrl !== "string") {
+    throw new MobileDriverError("Trusted Appium server URL must be a non-empty string", 400, true);
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trustedUrl);
+  } catch {
+    throw new MobileDriverError(`Invalid trusted Appium server URL: ${trustedUrl}`, 400, true);
+  }
+
+  if (parsed.protocol !== "http:") {
+    throw new MobileDriverError(
+      `Invalid protocol "${parsed.protocol}" for trusted remote Appium. Only "http:" is permitted for the Docker bridge.`,
+      400,
+      true,
+    );
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new MobileDriverError("Trusted Appium server URL must not contain credentials", 400, true);
+  }
+
+  if (parsed.search || parsed.hash) {
+    throw new MobileDriverError(
+      "Trusted Appium server URL must not contain query parameters or a fragment",
+      400,
+      true,
+    );
+  }
+
+  const normPath = parsed.pathname.replace(/\/$/, "") || "/";
+  if (normPath !== "/") {
+    throw new MobileDriverError("Trusted Appium server URL must not contain a subpath", 400, true);
+  }
+
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  // For AWS remote execution, only the Docker bridge gateway interface 172.18.0.1 is permitted
+  if (hostname !== "172.18.0.1") {
+    throw new MobileDriverError(
+      `Remote host "${hostname}" is forbidden. For AWS remote execution, only the Docker bridge endpoint http://172.18.0.1:4724 is permitted.`,
+      403,
+      true,
+    );
+  }
+
+  // Only port 4724 (the socat bridge forwarding to the reverse tunnel) is permitted
+  if (parsed.port !== "4724") {
+    throw new MobileDriverError(
+      `Port "${parsed.port}" is forbidden for remote Appium. Only port 4724 is permitted.`,
+      403,
+      true,
+    );
+  }
+
+  return parsed;
+}
+
+/**
+ * Validates that the Appium server URL is safe.
+ * Permits local loopback interfaces (127.0.0.1, localhost, ::1),
+ * or the explicitly configured trusted remote Appium URL.
+ * Strictly blocks any attempt to connect to arbitrary hosts, public IPs, or metadata services.
+ */
+export function assertSafeAppiumUrl(serverUrl: string, trustedRemoteUrl?: string): URL {
+  if (!serverUrl || typeof serverUrl !== "string") {
+    throw new MobileDriverError("Appium server URL must be a non-empty string", 400, true);
+  }
+
   let parsed: URL;
   try {
     parsed = new URL(serverUrl);
   } catch {
     throw new MobileDriverError(`Invalid Appium server URL: ${serverUrl}`, 400, true);
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new MobileDriverError(`Invalid protocol "${parsed.protocol}" for Appium server`, 400, true);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new MobileDriverError(
+      "Appium server URL must not contain credentials",
+      400,
+      true,
+    );
+  }
+
+  if (parsed.search || parsed.hash) {
+    throw new MobileDriverError(
+      "Appium server URL must not contain query parameters or a fragment",
+      400,
+      true,
+    );
+  }
+
+  const normPath = parsed.pathname.replace(/\/$/, "") || "/";
+  if (normPath !== "/") {
+    throw new MobileDriverError(
+      "Appium server URL must not contain a subpath",
+      400,
+      true,
+    );
   }
 
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -36,27 +137,52 @@ export function assertSafeAppiumUrl(serverUrl: string): URL {
     hostname === "localhost" ||
     hostname === "::1";
 
-  if (!isLocal) {
-    throw new MobileDriverError(
-      `Appium server must run on a local loopback interface (127.0.0.1 / localhost). Remote host "${hostname}" is forbidden for security.`,
-      403,
-      true,
-    );
+  if (isLocal) {
+    return parsed;
   }
 
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new MobileDriverError(`Invalid protocol "${parsed.protocol}" for Appium server`, 400, true);
+  const isDockerHost =
+    hostname === "host.docker.internal" &&
+    process.env.APPIUM_ALLOW_DOCKER_HOST === "true" &&
+    (parsed.port === "" || parsed.port === "4723");
+
+  if (isDockerHost) {
+    return parsed;
   }
 
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new MobileDriverError(
-      "Appium server URL must not contain credentials, query parameters, or a fragment",
-      400,
-      true,
-    );
+  const rawCandidate =
+    trustedRemoteUrl ??
+    process.env.APPIUM_TRUSTED_REMOTE_URL ??
+    process.env.TRUSTED_REMOTE_APPIUM_URL;
+
+  const rawTrusted =
+    typeof rawCandidate === "string" && rawCandidate.trim() !== ""
+      ? rawCandidate.trim()
+      : undefined;
+
+  if (rawTrusted) {
+    // Validate the trusted remote endpoint independently.
+    // A URL cannot authorize itself unless it strictly satisfies the permitted Docker bridge configuration.
+    const trustedParsed = validateTrustedRemoteAppiumUrl(rawTrusted);
+    const trustedHost = trustedParsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const normTrustedPath = trustedParsed.pathname.replace(/\/$/, "") || "/";
+
+    const matchesExact =
+      parsed.protocol === trustedParsed.protocol &&
+      hostname === trustedHost &&
+      parsed.port === trustedParsed.port &&
+      normPath === normTrustedPath;
+
+    if (matchesExact) {
+      return parsed;
+    }
   }
 
-  return parsed;
+  throw new MobileDriverError(
+    `Remote host "${hostname}" is forbidden for security. Appium server must run on a local loopback interface or the exact configured trusted remote URL.`,
+    403,
+    true,
+  );
 }
 
 /**
@@ -68,10 +194,11 @@ export class AppiumClient implements IMobileDriver {
   private _sessionId: string | null = null;
   private readonly baseUrl: string;
   private currentCaps: MobileCapabilities | null = null;
+  private sessionCaps: Record<string, any> | null = null;
   private windowSize: { width: number; height: number } | null = null;
 
-  constructor(serverUrl: string = "http://127.0.0.1:4723") {
-    const safeUrl = assertSafeAppiumUrl(serverUrl);
+  constructor(serverUrl: string = "http://127.0.0.1:4723", trustedRemoteUrl?: string) {
+    const safeUrl = assertSafeAppiumUrl(serverUrl, trustedRemoteUrl);
     // Strip trailing slash if present
     this.baseUrl = safeUrl.origin + (safeUrl.pathname.endsWith("/") ? safeUrl.pathname.slice(0, -1) : safeUrl.pathname);
   }
@@ -169,8 +296,14 @@ export class AppiumClient implements IMobileDriver {
       },
     };
 
-    const res = await this.request<{ sessionId: string }>("POST", "/session", body, 60000);
+    const res = await this.request<{ sessionId: string; capabilities?: Record<string, any> }>(
+      "POST",
+      "/session",
+      body,
+      60000,
+    );
     this._sessionId = res.sessionId;
+    this.sessionCaps = res.capabilities || null;
 
     // Set implicit wait timeout to allow elements to render during transitions
     try {
@@ -186,6 +319,7 @@ export class AppiumClient implements IMobileDriver {
     if (!this._sessionId) return;
     const sId = this._sessionId;
     this._sessionId = null;
+    this.sessionCaps = null;
     try {
       await this.request("DELETE", `/session/${sId}`, undefined, 10000);
     } catch (e) {
@@ -456,29 +590,66 @@ export class AppiumClient implements IMobileDriver {
   public async getDeviceInfo(): Promise<MobileDeviceInfo> {
     const sId = this.assertSession();
     try {
-      const caps = await this.request<Record<string, any>>("GET", `/session/${sId}`);
-      const platformVersion = String(
-        caps?.platformVersion || caps?.["appium:platformVersion"] || "17",
-      );
-      const deviceName = String(
-        caps?.deviceName || caps?.["appium:deviceName"] || "emulator-5554",
-      );
-      const model = String(caps?.deviceModel || "Android Emulator");
+      const rawRes = this.sessionCaps || (await this.request<Record<string, any>>("GET", `/session/${sId}`));
+      const caps = (rawRes && typeof rawRes === "object" && "capabilities" in rawRes && rawRes.capabilities)
+        ? rawRes.capabilities
+        : (rawRes && typeof rawRes === "object" && "value" in rawRes && rawRes.value && typeof rawRes.value === "object" && !("error" in rawRes.value))
+        ? rawRes.value
+        : rawRes;
+
+      const rawVersion =
+        caps?.platformVersion ??
+        caps?.["appium:platformVersion"] ??
+        caps?.deviceApiLevel ??
+        caps?.["appium:deviceApiLevel"];
+      const osVersion = rawVersion !== undefined && rawVersion !== null && String(rawVersion).trim() !== ""
+        ? String(rawVersion).trim()
+        : "unknown";
+
+      const rawUdid =
+        caps?.deviceUDID ??
+        caps?.["appium:deviceUDID"] ??
+        caps?.["appium:udid"] ??
+        caps?.udid ??
+        this.currentCaps?.["appium:udid"];
+      const udid = rawUdid !== undefined && rawUdid !== null && String(rawUdid).trim() !== ""
+        ? String(rawUdid).trim()
+        : "unknown";
+
+      const rawDeviceName =
+        caps?.deviceName ??
+        caps?.["appium:deviceName"] ??
+        (udid !== "unknown" ? udid : undefined) ??
+        this.currentCaps?.["appium:deviceName"];
+      const deviceName = rawDeviceName !== undefined && rawDeviceName !== null && String(rawDeviceName).trim() !== ""
+        ? String(rawDeviceName).trim()
+        : (udid !== "unknown" ? udid : "unknown");
+
+      const rawModel = caps?.deviceModel ?? caps?.["appium:deviceModel"] ?? caps?.model;
+      const model = rawModel !== undefined && rawModel !== null && String(rawModel).trim() !== ""
+        ? String(rawModel).trim()
+        : undefined;
+
+      const rawApiLevel = caps?.deviceApiLevel ?? caps?.["appium:deviceApiLevel"];
+      const apiLevel = rawApiLevel !== undefined && rawApiLevel !== null && String(rawApiLevel).trim() !== ""
+        ? String(rawApiLevel).trim()
+        : undefined;
 
       return {
         platform: "android",
         deviceName,
-        osVersion: platformVersion,
-        udid: String(this.currentCaps?.["appium:udid"] || "emulator-5554"),
-        model,
+        osVersion,
+        udid,
+        ...(model ? { model } : {}),
+        ...(apiLevel ? { apiLevel } : {}),
       };
     } catch {
+      const fallbackUdid = String(this.currentCaps?.["appium:udid"] || "").trim() || "unknown";
       return {
         platform: "android",
-        deviceName: "emulator-5554",
-        osVersion: "17",
-        udid: "emulator-5554",
-        model: "sdk_gphone64_x86_64",
+        deviceName: fallbackUdid,
+        osVersion: "unknown",
+        udid: fallbackUdid,
       };
     }
   }

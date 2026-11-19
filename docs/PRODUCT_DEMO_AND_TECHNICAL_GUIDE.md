@@ -97,11 +97,20 @@ Endpoint runs send real HTTP requests to the configured target. POST/PUT/PATCH/D
 
 ### Mobile Testing
 
-The Android workflow reports live Appium and ADB status, registers project-scoped devices, selects a device for execution, and supports authoring/validating mobile DSL instructions. A real run requires Android SDK Platform Tools (`adb`) on the backend process `PATH`, an authorized connected device/emulator (`adb devices -l` should show state `device`), Appium with UiAutomator2 installed, and an Appium server reachable from the backend.
+The Android workflow reports live Appium status, registers project-scoped devices, selects a device for execution, and supports authoring/validating mobile DSL instructions. A real run requires an Appium server reachable from the backend with UiAutomator2 installed, controlling an authorized connected device or emulator (`emulator-5554`).
 
-Configure `APPIUM_URL` to the local Appium base URL (default `http://127.0.0.1:4723`). Optionally set `ANDROID_DEVICE_UDID` for API/background execution without registering a device; dashboard runs use a project-registered device. Appium URLs are restricted to loopback hosts to prevent server-side request forgery. Keep the backend, Appium server, and ADB device access in the same host/network namespace; the backend Docker image does not include Android SDK/ADB, and a container's `127.0.0.1` is not the host machine. iOS execution is not available in this Android-first workflow.
+For local development where the backend runs on the Windows host, Appium runs at the default `http://127.0.0.1:4723` and discovers devices using local ADB.
 
-Typical local setup:
+In the AWS EC2 Docker deployment:
+- Appium and the Android emulator remain entirely on the local development machine (Windows host).
+- An SSH reverse tunnel (`ssh -R 4723:127.0.0.1:4723`) forwards EC2 loopback port 4723 to Windows Appium.
+- An EC2 `socat` TCP bridge forwards Docker bridge gateway `http://172.18.0.1:4724` to `127.0.0.1:4723`.
+- The AWS backend container configures `APPIUM_URL=http://172.18.0.1:4724` and `APPIUM_TRUSTED_REMOTE_URL=http://172.18.0.1:4724`.
+- Strict validation allowlists only the Docker bridge endpoint `http://172.18.0.1:4724`; arbitrary public IPs, external hostnames, private addresses, and credentials are prohibited.
+- ADB is not installed or exposed in the AWS backend image; Windows Appium controls the Android emulator locally.
+- `APPIUM_ALLOW_DOCKER_HOST` is kept `false` in production.
+
+Typical local setup on Windows:
 
 ```text
 adb devices -l
@@ -109,7 +118,7 @@ appium driver install uiautomator2
 appium --address 127.0.0.1 --port 4723
 ```
 
-In the dashboard, register the UDID shown by ADB with a local Appium URL, select the connected device, and confirm the status panel reports both Appium ready and the device connected before starting a run. Only `admin`/`qa_manager` users can register devices; project QA engineers can create and run approved tests.
+In the dashboard, register the device UDID (`emulator-5554`) for your project, select the device, and trigger synchronous or queued background mobile runs. Only `admin`/`qa_manager` users can register devices; project QA engineers can create and run approved tests. The `seedMobileDevice.ts` helper requires `MOBILE_SEED_PROJECT_ID` and seeds only that project.
 
 ### Suites
 

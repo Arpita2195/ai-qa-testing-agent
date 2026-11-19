@@ -75,7 +75,7 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
           });
         }
       }
-      const appiumUrl = assertSafeAppiumUrl(configuredAppiumUrl);
+      const appiumUrl = assertSafeAppiumUrl(configuredAppiumUrl, env.APPIUM_TRUSTED_REMOTE_URL);
       const statusUrl = new URL("status", `${appiumUrl.toString().replace(/\/$/, "")}/`);
       let appiumOnline = false;
       let appiumVersion = "unknown";
@@ -100,7 +100,21 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         clearTimeout(timeout);
       }
 
-      const discovery = await discoverAndroidDevices();
+      const isRemote = Boolean(env.APPIUM_TRUSTED_REMOTE_URL);
+      const [discovery, activeDevicesRes] = await Promise.all([
+        discoverAndroidDevices(),
+        pool.query<{ count: string }>(
+          `SELECT count(*) FROM mobile_devices
+           WHERE project_id = $1 AND platform = 'android' AND is_active = TRUE`,
+          [params.data.projectId],
+        ),
+      ]);
+      const hasActiveDevices = parseInt(activeDevicesRes.rows[0]?.count || "0", 10) > 0;
+      const localAdbAvailable = discovery.devices.some((device) => device.state === "device");
+      const androidAvailable = isRemote
+        ? Boolean(appiumReady && hasActiveDevices)
+        : localAdbAvailable;
+
       return reply.code(200).send({
         appium: {
           online: appiumOnline,
@@ -108,11 +122,18 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
           version: appiumVersion,
           url: appiumUrl.origin + appiumUrl.pathname.replace(/\/$/, ""),
           driver: "UiAutomator2",
+          isRemote,
           ...(appiumError ? { error: appiumError } : {}),
         },
         android: {
-          available: discovery.devices.some((device) => device.state === "device"),
+          available: androidAvailable,
+          hasRegisteredDevice: hasActiveDevices,
           devices: discovery.devices,
+          isRemote,
+          remoteReady: isRemote && appiumReady && hasActiveDevices,
+          discoverySource: isRemote
+            ? (appiumReady && hasActiveDevices ? "remote_appium" : "none")
+            : (localAdbAvailable ? "local_adb" : "none"),
           ...(discovery.error ? { error: discovery.error } : {}),
         },
         ios: {
@@ -162,27 +183,63 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         await assertProjectAccess(request.user, params.data.projectId, "viewer");
       }
 
-      const [devicesRes, discovery] = await Promise.all([
+      const [devicesRes, discovery, verifiedRes] = await Promise.all([
         pool.query(
           `SELECT id, project_id, name, platform, udid, os_version, appium_url, is_active, created_at
            FROM mobile_devices WHERE project_id = $1 ORDER BY created_at ASC`,
           [params.data.projectId],
         ),
         discoverAndroidDevices(),
+        pool.query<{ udid: string }>(
+          `SELECT DISTINCT (tr.device_info->>'udid') AS udid
+           FROM test_results tr
+           JOIN test_runs r ON r.id = tr.run_id
+           WHERE r.project_id = $1 AND r.run_type = 'mobile' AND tr.status IN ('passed', 'failed')
+             AND tr.device_info->>'udid' IS NOT NULL`,
+          [params.data.projectId],
+        ),
       ]);
+      const isRemote = Boolean(env.APPIUM_TRUSTED_REMOTE_URL);
       const detectedByUdid = new Map(discovery.devices.map((device) => [device.udid, device]));
+      const verifiedUdids = new Set(verifiedRes.rows.map((row) => row.udid));
+
       const devices = devicesRes.rows.map((device) => {
         const detected = detectedByUdid.get(device.udid);
+        const isLocallyDetected = detected?.state === "device";
+        const isVerifiedRemote = isRemote && device.is_active && verifiedUdids.has(device.udid);
+
+        let state = "not detected";
+        let discoverySource = "none";
+        let connected = false;
+
+        if (isLocallyDetected) {
+          state = detected?.state || "device";
+          discoverySource = "local_adb";
+          connected = true;
+        } else if (isRemote && device.is_active) {
+          discoverySource = "remote_appium";
+          if (isVerifiedRemote) {
+            state = "remote_verified";
+            connected = true;
+          } else {
+            state = "unverified_remote";
+            connected = false;
+          }
+        }
+
         return {
           ...device,
-          connected: detected?.state === "device",
-          state: detected?.state ?? "not detected",
+          connected,
+          state,
+          discoverySource,
           model: detected?.model,
+          verified: isLocallyDetected || isVerifiedRemote,
         };
       });
 
       return reply.code(200).send({
         devices,
+        isRemote,
         ...(discovery.error ? { discoveryError: discovery.error } : {}),
       });
     },
@@ -208,12 +265,25 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      const rawBody = request.body as Record<string, unknown> | undefined;
+      // Security: In trusted remote execution mode (e.g. AWS), project users cannot override the administrator-configured Appium endpoint
+      if (
+        env.APPIUM_TRUSTED_REMOTE_URL &&
+        rawBody?.appium_url &&
+        typeof rawBody.appium_url === "string" &&
+        rawBody.appium_url.replace(/\/$/, "") !== env.APPIUM_URL.replace(/\/$/, "")
+      ) {
+        return reply.code(400).send({
+          error: "Configured remote Appium endpoint cannot be overridden through project device registration.",
+        });
+      }
+
       let appiumUrl: string;
       try {
-        appiumUrl = assertSafeAppiumUrl(body.data.appium_url).toString().replace(/\/$/, "");
+        appiumUrl = assertSafeAppiumUrl(body.data.appium_url, env.APPIUM_TRUSTED_REMOTE_URL).toString().replace(/\/$/, "");
       } catch (error) {
         return reply.code(400).send({
-          error: error instanceof Error ? error.message : "Invalid local Appium URL",
+          error: error instanceof Error ? error.message : "Invalid Appium URL",
         });
       }
 
@@ -227,6 +297,10 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(409).send({ error: "This Android device is already registered and active for this project." });
       }
 
+      const finalAppiumUrl = env.APPIUM_TRUSTED_REMOTE_URL
+        ? env.APPIUM_URL.replace(/\/$/, "")
+        : appiumUrl;
+
       const insertRes = await pool.query(
         `INSERT INTO mobile_devices (id, project_id, name, platform, udid, os_version, appium_url, is_active)
          VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, TRUE)
@@ -237,7 +311,7 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
           body.data.platform,
           body.data.udid,
           body.data.os_version || null,
-          appiumUrl,
+          finalAppiumUrl,
         ],
       );
 
@@ -279,7 +353,7 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         deviceConfiguration = await resolveMobileDeviceConfiguration(
           project.id,
           body.data.device_udid,
-          body.data.async,
+          false,
         );
       } catch (error) {
         return reply.code(400).send({
@@ -287,7 +361,7 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      if (!body.data.async && !deviceConfiguration) {
+      if (!deviceConfiguration) {
         return reply.code(400).send({
           error: "No Android device is configured. Register an active device before running tests.",
         });
@@ -322,7 +396,7 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
         details: {
           runId,
           testCaseId: body.data.test_case_id,
-          deviceUdid: deviceConfiguration?.udid,
+          deviceUdid: deviceConfiguration.udid,
           platform: body.data.platform,
         },
         ipAddress: request.ip,
@@ -341,8 +415,8 @@ const mobileRoutes: FastifyPluginAsync = async (fastify) => {
             includeNonApproved: body.data.include_non_approved,
             appPackage: body.data.app_package,
             appActivity: body.data.app_activity,
-            deviceUdid: deviceConfiguration?.udid,
-            appiumUrl: deviceConfiguration?.appiumUrl,
+            deviceUdid: deviceConfiguration.udid,
+            appiumUrl: deviceConfiguration.appiumUrl,
             platform: body.data.platform,
             retries: body.data.retries,
           },
