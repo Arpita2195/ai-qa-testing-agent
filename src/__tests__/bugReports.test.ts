@@ -33,6 +33,7 @@ describe("Bug report API failures", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject([report]);
     expect(query.mock.calls[0][0]).toContain("LEFT JOIN api_test_results ar");
+    expect(query.mock.calls[0][0]).toContain("LEFT JOIN projects p");
     await app.close();
   });
 

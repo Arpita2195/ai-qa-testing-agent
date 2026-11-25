@@ -48,6 +48,8 @@ interface BugReportRow {
   created_at: Date;
   test_case_title?: string;
   source?: "web" | "api";
+  project_id?: string | null;
+  project_name?: string | null;
 }
 
 async function loadFailure(resultId: string): Promise<FailureRow | undefined> {
@@ -231,7 +233,10 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
       );
     }
     const reports = await pool.query<BugReportRow>(
-      `SELECT br.*, COALESCE(tc.title, ae.name) AS test_case_title,
+      `SELECT br.*,
+              COALESCE(tc.project_id, web_run.project_id, api_run.project_id) AS project_id,
+              p.name AS project_name,
+              COALESCE(tc.title, ae.name) AS test_case_title,
               CASE WHEN br.api_result_id IS NULL THEN 'web' ELSE 'api' END AS source
        FROM bug_reports br
        LEFT JOIN test_cases tc ON tc.id = br.test_case_id
@@ -240,6 +245,7 @@ const bugReportRoutes: FastifyPluginAsync = async (fastify) => {
        LEFT JOIN test_results tr ON tr.id = br.result_id
        LEFT JOIN test_runs web_run ON web_run.id = tr.run_id
        LEFT JOIN test_runs api_run ON api_run.id = ar.run_id
+       LEFT JOIN projects p ON p.id = COALESCE(tc.project_id, web_run.project_id, api_run.project_id)
        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
        ORDER BY br.created_at DESC`,
       values,

@@ -375,6 +375,8 @@ interface BugReport {
   probable_cause: string;
   status: string;
   source?: "web" | "api";
+  project_id?: string | null;
+  project_name?: string | null;
 }
 
 interface EvidenceSummary {
@@ -6195,7 +6197,7 @@ function RunFileButton({
 function BugReportsPage() {
   const { data: projects, loading: projectsLoading, error: projectsError } =
     useResource<Project[]>("/projects");
-  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [reports, setReports] = useState<BugReport[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -6204,22 +6206,15 @@ function BugReportsPage() {
   const reload = useCallback(() => setReloadKey((value) => value + 1), []);
 
   useEffect(() => {
-    if (!selectedProjectId && projects?.length) {
-      setSelectedProjectId(projects[0].id);
-    }
-  }, [projects, selectedProjectId]);
-
-  useEffect(() => {
-    if (!selectedProjectId) {
-      setReports(null);
-      setLoading(false);
-      return;
-    }
     let active = true;
     setLoading(true);
     setError("");
     setReports(null);
-    api<BugReport[]>(`/bug-reports?projectId=${encodeURIComponent(selectedProjectId)}`)
+    const endpoint =
+      selectedProjectId && selectedProjectId !== "all"
+        ? `/bug-reports?projectId=${encodeURIComponent(selectedProjectId)}`
+        : "/bug-reports";
+    api<BugReport[]>(endpoint)
       .then((result) => {
         if (active) setReports(result);
       })
@@ -6242,21 +6237,28 @@ function BugReportsPage() {
       setMessage(reason instanceof Error ? reason.message : String(reason));
     }
   }
-  const selectedProject = projects?.find((project) => project.id === selectedProjectId);
+  const selectedProject =
+    selectedProjectId === "all"
+      ? null
+      : projects?.find((project) => project.id === selectedProjectId);
+
   return <section>
     <h1>Bug reports</h1>
-    <p className="muted">Review reports for one project at a time.</p>
+    <p className="muted">
+      {selectedProjectId === "all"
+        ? "Review detected bug reports across all projects."
+        : `Review reports for ${selectedProject?.name ?? "the selected project"}.`}
+    </p>
     <div style={{ margin: "16px 0", display: "flex", alignItems: "center", gap: "10px" }}>
       <label htmlFor="bug-report-project"><strong>Project</strong></label>
       <select
         id="bug-report-project"
         value={selectedProjectId}
-        disabled={projectsLoading || !projects?.length}
+        disabled={projectsLoading}
         onChange={(event) => setSelectedProjectId(event.target.value)}
         style={{ minWidth: "240px", maxWidth: "100%" }}
       >
-        {projectsLoading && <option value="">Loading projects…</option>}
-        {!projectsLoading && !projects?.length && <option value="">No projects available</option>}
+        <option value="all">All projects</option>
         {(projects ?? []).map((project) => (
           <option key={project.id} value={project.id}>{project.name}</option>
         ))}
@@ -6265,11 +6267,9 @@ function BugReportsPage() {
     {message && <p className="error" role="alert">{message}</p>}
     {projectsError ? <p className="notice error">{projectsError}</p> : null}
     <State loading={projectsLoading || loading} error={error}>
-      {!selectedProjectId ? (
-        <p className="notice">Select a project to view its bug reports.</p>
-      ) : (reports ?? []).length === 0 ? (
+      {(reports ?? []).length === 0 ? (
         <div className="empty-state">
-          <h2>No bug reports for {selectedProject?.name ?? "this project"}</h2>
+          <h2>{selectedProjectId === "all" ? "No bug reports found" : `No bug reports for ${selectedProject?.name ?? "this project"}`}</h2>
           <p>Failed API checks appear here automatically. Failed web tests appear after failure analysis; passing tests do not create reports.</p>
           <ol>
             <li>Run approved API checks; failed checks are added here automatically.</li>
@@ -6279,7 +6279,27 @@ function BugReportsPage() {
           <Link className="button-link" to="/projects">Open projects</Link>
         </div>
       ) : (reports ?? []).map((report) => <article className="row-card" key={report.id}>
-          <div><strong>{report.title}</strong><p>{report.source === "api" ? "API check" : "Web test"} · {report.classification} · {report.severity}</p><p>{report.description || report.probable_cause}</p><span className={`badge ${report.status}`}>{report.status}</span></div>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
+              <strong>{report.title}</strong>
+              {(report.project_name || report.project_id) && (
+                <span
+                  className="badge"
+                  style={{
+                    backgroundColor: "#e0f2fe",
+                    color: "#0369a1",
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                  }}
+                >
+                  {report.project_name || "Project"}
+                </span>
+              )}
+            </div>
+            <p>{report.source === "api" ? "API check" : "Web test"} · {report.classification} · {report.severity}</p>
+            <p>{report.description || report.probable_cause}</p>
+            <span className={`badge ${report.status}`}>{report.status}</span>
+          </div>
           <div className="actions"><button onClick={() => setStatus(report.id, "confirmed")}>Confirm</button><button className="secondary" onClick={() => setStatus(report.id, "dismissed")}>Dismiss</button></div>
         </article>)}
     </State>
