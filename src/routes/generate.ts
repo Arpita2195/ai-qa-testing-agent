@@ -129,6 +129,8 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
               resume: Boolean(body.data.resume),
               maxRetriesPerFunctionality: body.data.maxRetriesPerFunctionality,
               createdBy: request.user?.id,
+              targetPath: body.data.path ? body.data.path.trim() : undefined,
+              isCrawl: Boolean(body.data.crawl),
             });
           } catch (error) {
             if ((error as any)?.code === "BUDGET_EXCEEDED" || (error as any)?.statusCode === 429) {
@@ -153,6 +155,46 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
           }
 
           if (loopResult.createdTestCases.length === 0) {
+            if (loopResult.totalScenariosPlanned > 0 && loopResult.missingScenarios === 0) {
+              return {
+                status: 200,
+                body: {
+                  message: `All ${loopResult.totalScenariosPlanned} planned scenarios for this feature are already generated and up to date.`,
+                  created: 0,
+                  skipped_invalid: loopResult.skippedInvalid,
+                  skipped_duplicate: loopResult.skippedDuplicates,
+                  generation_mode: "loop_based",
+                  total_functionalities: loopResult.totalFunctionalities,
+                  completed_functionalities: loopResult.completedFunctionalities,
+                  scenarios_planned: loopResult.totalScenariosPlanned,
+                  scenarios_generated: loopResult.totalScenariosGenerated,
+                  missing_scenarios: loopResult.missingScenarios,
+                  status: loopResult.status,
+                  test_cases: [],
+                },
+              };
+            }
+
+            if (loopResult.skippedDuplicates > 0 && loopResult.skippedInvalid === 0) {
+              return {
+                status: 200,
+                body: {
+                  message: `All test cases for these scenarios already exist in this project (${loopResult.skippedDuplicates} duplicates skipped).`,
+                  created: 0,
+                  skipped_invalid: loopResult.skippedInvalid,
+                  skipped_duplicate: loopResult.skippedDuplicates,
+                  generation_mode: "loop_based",
+                  total_functionalities: loopResult.totalFunctionalities,
+                  completed_functionalities: loopResult.completedFunctionalities,
+                  scenarios_planned: loopResult.totalScenariosPlanned,
+                  scenarios_generated: loopResult.totalScenariosGenerated,
+                  missing_scenarios: loopResult.missingScenarios,
+                  status: loopResult.status,
+                  test_cases: [],
+                },
+              };
+            }
+
             return {
               status: 422,
               body: {

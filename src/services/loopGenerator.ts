@@ -28,7 +28,7 @@ import { reviewCandidateBatch } from "./ai/twoStageReviewService";
 import { getActiveStateTransitionsForProject } from "./ai/stateTransitionService";
 import type { StateTransitionEvidenceRow } from "./ai/stateTransitionTypes";
 import type { PageData, ScrapedPage, SiteData } from "./pageReader";
-import { findMatchingPageForPath } from "../utils/urlPageMatcher";
+import { findMatchingPageForPath, normalizePageIdentity, isPageIdentityMatch } from "../utils/urlPageMatcher";
 import {
   discoverPageFunctionalities,
   planScenariosForFunctionality,
@@ -79,6 +79,8 @@ export interface LoopGenerationOptions {
   maxRetriesPerFunctionality?: number;
   resume?: boolean;
   createdBy?: string;
+  targetPath?: string;
+  isCrawl?: boolean;
 }
 
 /**
@@ -233,19 +235,36 @@ export async function runLoopGeneration(
     allPlannedScenarios = [];
   }
 
-  // If no existing inventory in DB or fresh run, discover & plan from scraped pages
-  if (functionalities.length === 0) {
-    for (const page of siteData.pages) {
-      const pageFuncs = discoverPageFunctionalities(page, projectId);
-      for (const func of pageFuncs) {
+  const newFuncsToPersist: DiscoveredFunctionality[] = [];
+  const newScenariosToPersist: PlannedScenario[] = [];
+
+  // 1. Discover functionalities on scraped pages that aren't in the inventory yet
+  for (const page of siteData.pages) {
+    const pageFuncs = discoverPageFunctionalities(page, projectId);
+    for (const func of pageFuncs) {
+      const alreadyExists = functionalities.some(
+        (existing) => existing.pagePath === func.pagePath && existing.name === func.name,
+      );
+      if (!alreadyExists) {
         functionalities.push(func);
-        const scenarios = planScenariosForFunctionality(func);
-        allPlannedScenarios.push(...scenarios);
+        newFuncsToPersist.push(func);
       }
     }
+  }
 
-    // Persist discovered inventory and scenario checklist
-    await persistFunctionalitiesAndScenarios(projectId, functionalities, allPlannedScenarios);
+  // 2. Self-healing: ensure EVERY functionality has its scenarios planned in allPlannedScenarios
+  for (const func of functionalities) {
+    const hasScenarios = allPlannedScenarios.some((s) => s.functionalityId === func.id);
+    if (!hasScenarios) {
+      const scenarios = planScenariosForFunctionality(func);
+      allPlannedScenarios.push(...scenarios);
+      newScenariosToPersist.push(...scenarios);
+    }
+  }
+
+  // 3. Persist discovered inventory and scenario checklist
+  if (newFuncsToPersist.length > 0 || newScenariosToPersist.length > 0) {
+    await persistFunctionalitiesAndScenarios(projectId, newFuncsToPersist, newScenariosToPersist);
   }
 
   // Preload existing test case titles and ground-truth scenario statuses for duplicate prevention & true resumability
@@ -291,8 +310,35 @@ export async function runLoopGeneration(
   let skippedInvalid = 0;
   let completedFunctionalities = 0;
 
+  // Determine in-scope functionalities for this generation run:
+  let funcsToProcess = functionalities;
+  if (options.targetPath) {
+    const normTarget = normalizePageIdentity(options.targetPath).pathname;
+    const matched = functionalities.filter((func) => {
+      const funcPath = normalizePageIdentity(func.pagePath).pathname;
+      return funcPath === normTarget;
+    });
+    if (matched.length > 0) {
+      funcsToProcess = matched;
+    } else if (siteData.pages.length > 0) {
+      const siteMatched = functionalities.filter((func) =>
+        siteData.pages.some((page) => isPageIdentityMatch(func.pagePath, page)),
+      );
+      if (siteMatched.length > 0) {
+        funcsToProcess = siteMatched;
+      }
+    }
+  } else if (!options.isCrawl && siteData.pages.length > 0) {
+    const siteMatched = functionalities.filter((func) =>
+      siteData.pages.some((page) => isPageIdentityMatch(func.pagePath, page)),
+    );
+    if (siteMatched.length > 0) {
+      funcsToProcess = siteMatched;
+    }
+  }
+
   // Functionality-by-functionality loop
-  for (const func of functionalities) {
+  for (const func of funcsToProcess) {
     // Find ungenerated scenarios for this functionality using composite key
     let funcPendingScenarios = allPlannedScenarios.filter(
       (s) =>
@@ -745,14 +791,18 @@ export async function runLoopGeneration(
 }
 
   // Completeness check
-  const totalScenariosGenerated = allPlannedScenarios.filter((s) => s.status === "generated").length;
-  const missingScenarios = Math.max(0, allPlannedScenarios.length - totalScenariosGenerated);
+  const inScopeFuncIds = new Set(funcsToProcess.map((f) => f.id));
+  const inScopeScenarios = allPlannedScenarios.filter(
+    (s) => !s.functionalityId || inScopeFuncIds.has(s.functionalityId),
+  );
+  const totalScenariosGenerated = inScopeScenarios.filter((s) => s.status === "generated").length;
+  const missingScenarios = Math.max(0, inScopeScenarios.length - totalScenariosGenerated);
 
   return {
     projectId,
-    totalFunctionalities: functionalities.length,
+    totalFunctionalities: funcsToProcess.length,
     completedFunctionalities,
-    totalScenariosPlanned: allPlannedScenarios.length,
+    totalScenariosPlanned: inScopeScenarios.length,
     totalScenariosGenerated,
     missingScenarios,
     createdTestCases,

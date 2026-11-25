@@ -158,11 +158,37 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error("Authentication required. Please log in.");
   }
 
-  const payload: unknown = response.status === 204 ? null : await response.json();
+  const contentType = response.headers.get("content-type") || "";
+  let payload: unknown = null;
+
+  if (response.status !== 204) {
+    if (contentType.includes("application/json")) {
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+    } else {
+      const rawText = await response.text();
+      if (!response.ok) {
+        if (response.status === 504) {
+          throw new Error("Gateway Timeout (504): The crawl and generation took longer than the server proxy limit (60s). Try unchecking 'Recursive Crawl' to generate tests by page path.");
+        }
+        if (response.status === 502) {
+          throw new Error("Bad Gateway (502): The backend server is unreachable or restarting. Please try again shortly.");
+        }
+        throw new Error(`Server returned HTTP ${response.status}: ${rawText.slice(0, 150)}`);
+      }
+    }
+  }
+
   if (!response.ok) {
     const message =
       typeof payload === "object" && payload !== null && "error" in payload
-        ? String(payload.error)
+        ? String((payload as Record<string, unknown>).error) +
+          ((payload as Record<string, unknown>).message ? `: ${String((payload as Record<string, unknown>).message)}` : "")
+        : typeof payload === "object" && payload !== null && "message" in payload
+        ? String((payload as Record<string, unknown>).message)
         : `Request failed (${response.status})`;
     throw new Error(message);
   }
@@ -2906,10 +2932,14 @@ interface GenerateResponse {
   scenarios_planned?: number;
   scenarios_generated?: number;
   missing_scenarios?: number;
+  message?: string;
   test_cases: TestCase[];
 }
 
 function formatGenerationMessage(result: GenerateResponse): string {
+  if (result.message) {
+    return result.message;
+  }
   if (result.generation_mode === "loop_based") {
     const funcs = result.completed_functionalities ?? result.total_functionalities ?? 1;
     const scen = result.scenarios_generated ?? result.created;
