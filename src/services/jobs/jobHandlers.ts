@@ -18,10 +18,12 @@ import { writeRunReport, type RunReportCase } from "../runReport";
 import * as runReportService from "../runReport";
 import { compareRuns } from "../regressionService";
 import { generateTestCases } from "../generator";
+import { runLoopGeneration, withProjectGenerationLock } from "../loopGenerator";
+import { crawlSite } from "../crawler";
 import { registerJobHandler } from "./jobQueue";
 import { recordStoredArtifact } from "../storage/storageService";
 import * as storageService from "../storage/storageService";
-import { recordAiUsage, inMemoryMetrics } from "../observability/metricsService";
+import { inMemoryMetrics } from "../observability/metricsService";
 import { logger } from "../observability/logger";
 
 /**
@@ -693,33 +695,88 @@ export function initializeJobHandlers(): void {
 
   // 4. AI Test Generation & Analysis Handler
   registerJobHandler("ai_generation", async (payload) => {
-    const { projectId, prompt, pageData, requirementText, createdBy } = payload;
-    const t0 = Date.now();
+    const { projectId, prompt, pageData, requirementText, siteData, loop, resume, maxRetriesPerFunctionality, createdBy } = payload;
 
-    const generated = await generateTestCases(prompt || requirementText, pageData || { elements: [] });
-    const durationMs = Date.now() - t0;
+    const lockResult = await withProjectGenerationLock(projectId, async () => {
+      // Check if loop-based generation is requested
+      if (loop && siteData) {
+        const projectRes = await pool.query<{ name: string }>(
+          "SELECT name FROM projects WHERE id = $1",
+          [projectId],
+        );
+        const appName = projectRes.rows[0]?.name || "StockFlow";
 
-    // Track approximate token telemetry
-    const promptLen = (prompt || requirementText || "").length;
-    const completionLen = JSON.stringify(generated).length;
-    const promptTokens = Math.ceil(promptLen / 4);
-    const completionTokens = Math.ceil(completionLen / 4);
+        const loopResult = await runLoopGeneration(siteData, {
+          projectId,
+          appName,
+          resume: Boolean(resume),
+          maxRetriesPerFunctionality: maxRetriesPerFunctionality ?? 2,
+          createdBy,
+        });
 
-    await recordAiUsage({
-      projectId,
-      feature: "test_generation",
-      model: "gemini-2.5-flash",
-      promptTokens,
-      completionTokens,
-      durationMs,
-      createdBy,
+        return {
+          mode: "loop",
+          projectId,
+          totalFunctionalities: loopResult.totalFunctionalities,
+          completedFunctionalities: loopResult.completedFunctionalities,
+          scenariosPlanned: loopResult.totalScenariosPlanned,
+          scenariosGenerated: loopResult.totalScenariosGenerated,
+          missingScenarios: loopResult.missingScenarios,
+          createdCount: loopResult.createdTestCases.length,
+          skippedDuplicates: loopResult.skippedDuplicates,
+          skippedInvalid: loopResult.skippedInvalid,
+          status: loopResult.status,
+        };
+      }
+
+      const projectRes = await pool.query<{ name: string }>(
+        "SELECT name FROM projects WHERE id = $1",
+        [projectId],
+      );
+      const appName = projectRes.rows[0]?.name || "StockFlow";
+      const targetPageData = pageData || { elements: [] };
+      const generated = await generateTestCases(targetPageData, appName, { projectId });
+
+      return {
+        testCaseCount: generated.length,
+        generated,
+      };
+    });
+
+    if (!lockResult.acquired) {
+      throw new Error(`Project ${projectId} test generation is already in progress`);
+    }
+
+    return lockResult.result;
+  });
+
+  // 5. Autonomous Website Exploration / Crawler Handler
+  registerJobHandler("site_crawl", async (payload, job) => {
+    const { projectId, maxDepth, maxPages, timeoutMs, resume, startPath, createdBy } = payload;
+    const projectRes = await pool.query<{ id: string; name: string; base_url: string }>(
+      "SELECT id, name, base_url FROM projects WHERE id = $1",
+      [projectId],
+    );
+    const project = projectRes.rows[0];
+    if (!project) throw new Error(`Project ${projectId} not found`);
+
+    const result = await crawlSite(project, {
+      maxDepth,
+      maxPages,
+      timeoutMs,
+      resume: Boolean(resume),
+      startPath,
+      createdBy: createdBy || job.createdBy,
     });
 
     return {
-      testCaseCount: generated.length,
-      generated,
-      promptTokens,
-      completionTokens,
+      sessionId: result.sessionId,
+      projectId: result.projectId,
+      totalPagesCrawled: result.totalPagesCrawled,
+      functionalitiesDiscovered: result.functionalitiesDiscovered,
+      status: result.status,
+      durationMs: result.durationMs,
+      error: result.error,
     };
   });
 }

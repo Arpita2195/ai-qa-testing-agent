@@ -21,6 +21,10 @@ export function registerJobHandler(jobType: JobType, handler: JobHandler): void 
   handlers.set(jobType, handler);
 }
 
+export function getJobHandler(jobType: JobType): JobHandler | undefined {
+  return handlers.get(jobType);
+}
+
 /**
  * Maps database row to JobRecord interface.
  */

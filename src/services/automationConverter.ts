@@ -248,6 +248,7 @@ export interface TestCaseForAutomation {
 }
 
 export interface ProjectContext {
+  id?: string;
   name: string;
   base_url: string;
 }
@@ -520,7 +521,7 @@ For Mobile:
 `;
 
   try {
-    const rawAiOutput = await callGeminiWithRetry(prompt);
+    const rawAiOutput = await callGeminiWithRetry(prompt, { projectId: project.id });
     const jsonMatch = rawAiOutput.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       throw new Error("Gemini AI did not return a valid JSON object");

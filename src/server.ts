@@ -29,6 +29,9 @@ import { artifactRoutes } from "./routes/artifactRoutes";
 import { jobRoutes } from "./routes/jobRoutes";
 import { monitoringRoutes } from "./routes/monitoringRoutes";
 import mobileRoutes from "./routes/mobile";
+import crawlRoutes from "./routes/crawl";
+import projectAiConfigRoutes from "./routes/projectAiConfig";
+import { reportRoutes } from "./routes/reports";
 import { startScheduler } from "./services/scheduler";
 import { initializeJobHandlers } from "./services/jobs/jobHandlers";
 import { startJobWorkerLoop, stopJobWorkerLoop, closeBullQueues } from "./services/jobs/jobQueue";
@@ -163,6 +166,9 @@ app.register(artifactRoutes);
 app.register(jobRoutes);
 app.register(monitoringRoutes);
 app.register(mobileRoutes);
+app.register(crawlRoutes);
+app.register(projectAiConfigRoutes);
+app.register(reportRoutes);
 
 app.get<{ Params: { filename: string } }>("/artifacts/:filename", async (request, reply) => {
   const { filename } = request.params;

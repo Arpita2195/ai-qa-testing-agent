@@ -2,6 +2,7 @@ import type { Browser, BrowserContext, Locator, Page } from "@playwright/test";
 import { getProjectAccess } from "./secretStore";
 import { assertTargetUrlAllowed, attachUrlGuardToPage } from "./urlGuard";
 import { detectInteractiveAuthNeeds } from "./loginDetector";
+import { isStockFlowUrl } from "./pageReader";
 
 async function getStableSelector(locator: Locator): Promise<string> {
   return await locator.evaluate((node: Element): string => {
@@ -171,7 +172,7 @@ export async function setupAuthenticatedBrowser(
   await assertTargetUrlAllowed(baseUrl);
 
   const access = await getProjectAccess(projectId);
-  const isStockflow = baseUrl.includes("stockflow") || (process.env.STOCKFLOW_BASE_URL && baseUrl.includes(process.env.STOCKFLOW_BASE_URL));
+  const isStockflow = isStockFlowUrl(baseUrl);
 
   // Case 1: Try stored session first
   if (access?.session) {

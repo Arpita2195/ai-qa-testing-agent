@@ -40,6 +40,10 @@ const enqueueAiGenerationSchema = z.object({
   prompt: z.string().min(1).optional(),
   requirementText: z.string().min(1).optional(),
   pageData: z.record(z.string(), z.any()).optional(),
+  siteData: z.any().optional(),
+  loop: z.boolean().optional(),
+  resume: z.boolean().optional(),
+  maxRetriesPerFunctionality: z.number().int().min(0).max(5).optional(),
 });
 
 export const jobRoutes: FastifyPluginAsync = async (app) => {
@@ -277,6 +281,10 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
           prompt: body.data.prompt,
           requirementText: body.data.requirementText,
           pageData: body.data.pageData,
+          siteData: body.data.siteData,
+          loop: body.data.loop,
+          resume: body.data.resume,
+          maxRetriesPerFunctionality: body.data.maxRetriesPerFunctionality,
           createdBy: request.user?.id,
         },
         createdBy: request.user?.id,

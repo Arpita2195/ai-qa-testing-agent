@@ -73,8 +73,14 @@ export function createAuthHook(platformApiKey: string): onRequestHookHandler {
         request.session = sessionData.session;
         request.isCookieAuth = true;
 
+        // Exempt authentication endpoints (/auth/login, /auth/logout, /auth/register) from CSRF check:
+        // A user logging in or resetting their session must not be locked out by an existing browser cookie.
+        const path = request.url.split("?")[0].replace(/\/+$/, "");
+        const isCsrfExempt =
+          path === "/auth/login" || path === "/auth/logout" || path === "/auth/register";
+
         // Enforce CSRF protection for state-changing HTTP methods on cookie-authenticated requests
-        if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+        if (!isCsrfExempt && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
           const csrfHeader = request.headers["x-csrf-token"];
           if (
             !csrfHeader ||

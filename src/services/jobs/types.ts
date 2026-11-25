@@ -3,7 +3,8 @@ export type JobType =
   | "api_execution"
   | "mobile_execution"
   | "regression_run"
-  | "ai_generation";
+  | "ai_generation"
+  | "site_crawl";
 
 export type JobStatus =
   | "pending"

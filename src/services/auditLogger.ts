@@ -28,11 +28,20 @@ export async function logAuditEvent(entry: AuditLogEntry): Promise<void> {
       sanitizedDetails = copy;
     }
 
+    // Validate actor existence to prevent foreign key violations on synthetic actors
+    let validActorId = entry.actorId ?? null;
+    if (validActorId) {
+      const userCheck = await pool.query("SELECT 1 FROM users WHERE id = $1", [validActorId]);
+      if (userCheck.rowCount === 0) {
+        validActorId = null;
+      }
+    }
+
     await pool.query(
       `INSERT INTO audit_logs (actor_id, action, project_id, target_resource, outcome, details, ip_address, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
       [
-        entry.actorId ?? null,
+        validActorId,
         entry.action,
         entry.projectId ?? null,
         entry.targetResource ?? null,

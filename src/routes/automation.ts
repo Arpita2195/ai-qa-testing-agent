@@ -169,6 +169,7 @@ const automationRoutes: FastifyPluginAsync = async (fastify) => {
             test_type: tc.test_type,
           },
           {
+            id: project.id,
             name: project.name,
             base_url: project.base_url,
           },

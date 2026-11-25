@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { callGeminiWithRetry, isRetryableGeminiError } from "./generator";
 import { redactSecrets } from "./runner";
+import { reviewCandidateBatch } from "./ai/twoStageReviewService";
 
 export const requirementTestCaseSchema = z.object({
   title: z.string().min(1).max(255),
@@ -10,6 +11,7 @@ export const requirementTestCaseSchema = z.object({
   expected_result: z.string().min(1),
   priority: z.enum(["low", "medium", "high", "critical"]),
   test_type: z.enum(["positive", "negative", "boundary", "edge_case"]),
+  ai_review_metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type RequirementTestCase = z.infer<typeof requirementTestCaseSchema>;
@@ -42,7 +44,7 @@ function cleanJsonResponse(raw: string): string {
  */
 export async function generateTestCasesFromRequirements(
   requirementsText: string,
-  projectContext?: { name?: string; baseUrl?: string },
+  projectContext?: { name?: string; baseUrl?: string; projectId?: string },
 ): Promise<RequirementTestCase[]> {
   const contextSnippet = projectContext?.name
     ? `Target Project: ${projectContext.name} (${projectContext.baseUrl || "Web/API/Mobile Application"})`
@@ -94,7 +96,7 @@ CRITICAL RULES:
 
   let responseText: string;
   try {
-    responseText = await callGeminiWithRetry(prompt);
+    responseText = await callGeminiWithRetry(prompt, { projectId: projectContext?.projectId });
   } catch (error) {
     if (isRetryableGeminiError(error)) {
       throw new RequirementsGenerationError(
@@ -130,7 +132,37 @@ CRITICAL RULES:
         }
       }
       if (recovered.length >= 2) {
-        return recovered.map(sanitizeTestCase);
+        const sanitized = recovered.map(sanitizeTestCase);
+        if (projectContext?.projectId) {
+          const reviewed = await reviewCandidateBatch({
+            projectId: projectContext.projectId,
+            candidates: sanitized.map((tc) => ({
+              title: tc.title,
+              description: tc.requirement_description,
+              steps: tc.steps,
+              expected_result: tc.expected_result,
+              category: tc.test_type,
+              priority: tc.priority,
+              preconditions: tc.preconditions,
+            })),
+            evidence: {
+              source: "requirements_doc",
+              appName: projectContext.name,
+              requirementText: requirementsText,
+            },
+          });
+          return reviewed.map((r) => ({
+            title: r.title,
+            requirement_description: r.description,
+            preconditions: r.preconditions || "",
+            steps: r.steps,
+            expected_result: r.expected_result,
+            priority: r.priority,
+            test_type: r.category,
+            ai_review_metadata: r.ai_review_metadata as Record<string, unknown>,
+          }));
+        }
+        return sanitized;
       }
     }
     throw new RequirementsGenerationError(
@@ -139,7 +171,38 @@ CRITICAL RULES:
     );
   }
 
-  return validated.data.map(sanitizeTestCase);
+  const sanitized = validated.data.map(sanitizeTestCase);
+  if (projectContext?.projectId) {
+    const reviewed = await reviewCandidateBatch({
+      projectId: projectContext.projectId,
+      candidates: sanitized.map((tc) => ({
+        title: tc.title,
+        description: tc.requirement_description,
+        steps: tc.steps,
+        expected_result: tc.expected_result,
+        category: tc.test_type,
+        priority: tc.priority,
+        preconditions: tc.preconditions,
+      })),
+      evidence: {
+        source: "requirements_doc",
+        appName: projectContext.name,
+        requirementText: requirementsText,
+      },
+    });
+    return reviewed.map((r) => ({
+      title: r.title,
+      requirement_description: r.description,
+      preconditions: r.preconditions || "",
+      steps: r.steps,
+      expected_result: r.expected_result,
+      priority: r.priority,
+      test_type: r.category,
+      ai_review_metadata: r.ai_review_metadata as Record<string, unknown>,
+    }));
+  }
+
+  return sanitized;
 }
 
 function sanitizeTestCase(tc: RequirementTestCase): RequirementTestCase {

@@ -258,6 +258,21 @@ describe("TASK 5: Authentication and Role-Based Access Control (RBAC)", () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ managed: true });
     });
+
+    it("allows POST /auth/login without CSRF token even when an existing cookie is present (prevents login lockout)", async () => {
+      const res = await app!.inject({
+        method: "POST",
+        url: "/auth/login",
+        cookies: { qa_session: validSessionToken },
+        payload: {
+          email: "admin@qa-testing.local",
+          password: "any-password",
+        },
+      });
+
+      // It must NOT fail with 403 CSRF verification failed
+      expect(res.statusCode).not.toBe(403);
+    });
   });
 
   describe("Role-Based Access Control (RBAC) & Project-Level Permissions", () => {

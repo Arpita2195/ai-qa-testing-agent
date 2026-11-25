@@ -12,3 +12,8 @@ test-results/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# Diagnostics & temporary audit scripts
+scratch/
+debug.log
+*.log

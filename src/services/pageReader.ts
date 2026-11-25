@@ -83,7 +83,7 @@ export function findLoginElements(elements: PageElement[]): LoginElements | null
   return { email, password, submit };
 }
 
-async function waitForRealContent(page: Page, timeout = 30000): Promise<void> {
+export async function waitForRealContent(page: Page, timeout = 30000): Promise<void> {
   await page.waitForLoadState("domcontentloaded", { timeout });
   try {
     await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 5000) });
@@ -165,7 +165,7 @@ export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {
       .filter(Boolean);
 
     const elements = Array.from(
-      document.querySelectorAll("a, button, input, form, select, textarea"),
+      document.querySelectorAll("a, button, input, form, select, textarea, table"),
     )
       .filter(visible)
       .slice(0, 40)
@@ -190,9 +190,11 @@ export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {
           href: element instanceof HTMLAnchorElement ? element.href : undefined,
           name: element.getAttribute("name") ?? undefined,
           placeholder: element.getAttribute("placeholder") ?? undefined,
-          value: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
-            ? element.value
-            : undefined,
+          value:
+            (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+            element.getAttribute("type")?.toLowerCase() !== "password"
+              ? element.value
+              : undefined,
           required: element instanceof HTMLInputElement ||
             element instanceof HTMLSelectElement ||
             element instanceof HTMLTextAreaElement

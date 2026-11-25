@@ -60,6 +60,11 @@ export function encryptSecret(plaintext: string): string {
   }
 
   const key = Buffer.from(keyString, "base64");
+  if (key.length !== 32) {
+    throw new Error(
+      `Invalid ENCRYPTION_KEY: expected 32 bytes (256 bits) in base64, got ${key.length} bytes`,
+    );
+  }
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
 
@@ -85,6 +90,11 @@ export function decryptSecret(ciphertext: string): string {
   }
 
   const key = Buffer.from(keyString, "base64");
+  if (key.length !== 32) {
+    throw new Error(
+      `Invalid ENCRYPTION_KEY: expected 32 bytes (256 bits) in base64, got ${key.length} bytes`,
+    );
+  }
   const iv = Buffer.from(ivHex, "hex");
   const tag = Buffer.from(tagHex, "hex");
   const data = Buffer.from(dataHex, "hex");

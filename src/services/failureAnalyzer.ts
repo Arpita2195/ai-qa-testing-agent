@@ -1,6 +1,6 @@
-import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { env } from "../config/env";
+import { callGemini } from "./generator";
 
 export interface FailureAnalysisInput {
   title: string;
@@ -20,19 +20,12 @@ const failureAnalysisSchema = z.object({
   reproduction_steps: z.array(z.string()),
 });
 
-async function callGemini(prompt: string): Promise<string> {
-  const client = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
-  const response = await client.models.generateContent({
-    model: env.AI_MODEL,
-    contents: prompt,
-    config: { responseMimeType: "application/json" },
+async function callGeminiForFailure(prompt: string, projectId?: string): Promise<string> {
+  return await callGemini(prompt, {
+    projectId,
+    feature: "failure_analysis",
+    skipCache: true, // Context-sensitive failure analysis is strictly never cached
   });
-
-  if (!response.text) {
-    throw new Error("Gemini returned an empty failure analysis");
-  }
-
-  return response.text;
 }
 
 function sanitizeCredentials(value: unknown): unknown {
@@ -61,6 +54,7 @@ function sanitizeCredentials(value: unknown): unknown {
 
 export async function analyzeFailure(
   input: FailureAnalysisInput,
+  options?: { projectId?: string },
 ): Promise<z.infer<typeof failureAnalysisSchema>> {
   const sanitizedInput = sanitizeCredentials(input);
   const prompt = `Analyze this test failure and return JSON only with exactly these fields: "title", "description", "severity" ("low", "medium", "high", or "critical"), "classification" ("product_bug", "test_issue", "environment_issue", or "unknown"), "probable_cause", and "reproduction_steps" (array of strings).
@@ -70,7 +64,7 @@ The test runner has already determined that this test failed. Do not decide or c
 Failure data:
 ${JSON.stringify(sanitizedInput)}`;
 
-  const responseText = await callGemini(prompt);
+  const responseText = await callGeminiForFailure(prompt, options?.projectId);
   let parsed: unknown;
 
   try {

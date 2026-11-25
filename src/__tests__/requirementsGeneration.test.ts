@@ -286,6 +286,9 @@ describe("TASK 6: Requirements-Based AI Test Case Generation", () => {
 
       const mockClient = {
         query: vi.fn().mockImplementation(async (sql: string) => {
+          if (sql.includes("pg_try_advisory_lock")) {
+            return { rowCount: 1, rows: [{ locked: true }] };
+          }
           if (sql.includes("INSERT INTO test_cases")) {
             return {
               rowCount: 1,

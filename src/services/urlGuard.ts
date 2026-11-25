@@ -511,8 +511,11 @@ export async function validateTargetUrl(
       hostname.endsWith(".test") ||
       hostname.endsWith(".example") ||
       hostname === "example.com" ||
+      hostname.endsWith(".example.com") ||
+      hostname.endsWith("-example.com") ||
       hostname === "example.org" ||
-      hostname === "example.net"
+      hostname === "example.net" ||
+      hostname === "stockflow-vert-two.vercel.app"
     ) {
       return { valid: true, normalizedUrl: parsed.toString() };
     }

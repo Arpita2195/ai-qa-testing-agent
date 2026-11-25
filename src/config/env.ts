@@ -9,6 +9,12 @@ export const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
   AI_MODEL: z.string().min(1, "AI_MODEL is required"),
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL: z.string().optional(),
+  OLLAMA_BASE_URL: z.string().optional(),
+  OLLAMA_MODEL: z.string().optional(),
+  GROQ_API_KEY: z.string().optional(),
+  GROQ_MODEL: z.string().optional(),
   PLATFORM_API_KEY: z
     .string()
     .min(16, "PLATFORM_API_KEY must be at least 16 characters"),

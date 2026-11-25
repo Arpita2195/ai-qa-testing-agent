@@ -6,6 +6,7 @@ import { extractTextFromDocument, DocumentProcessingError } from "../services/do
 import { generateTestCasesFromRequirements, RequirementsGenerationError } from "../services/requirementsGenerator";
 import { logAuditEvent } from "../services/auditLogger";
 import { redactSecrets } from "../services/runner";
+import { withProjectGenerationLock } from "../services/loopGenerator";
 
 const projectParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -134,12 +135,74 @@ const requirementRoutes: FastifyPluginAsync = async (fastify) => {
       );
       const savedDoc = insertDocResult.rows[0];
 
-      // Step 4: Call Gemini AI to generate test cases covering positive, negative, boundary, edge_case
-      let generatedCases;
+      // Step 4: Call Gemini AI + Groq Reviewer to generate and audit test cases
+      let lockResult;
       try {
-        generatedCases = await generateTestCasesFromRequirements(parsedDoc.text, {
-          name: project.name,
-          baseUrl: project.base_url,
+        lockResult = await withProjectGenerationLock(project.id, async () => {
+          let generatedCases;
+          try {
+            generatedCases = await generateTestCasesFromRequirements(parsedDoc.text, {
+              name: project.name,
+              baseUrl: project.base_url,
+              projectId: project.id,
+            });
+          } catch (err) {
+            if (err instanceof RequirementsGenerationError) {
+              throw err;
+            }
+            throw new Error(`AI test case generation failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+
+          // Step 5: Save generated test cases with review_status: 'pending' and ai_review_metadata
+          const createdTestCases: any[] = [];
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
+            for (const tc of generatedCases) {
+              const insertTc = await client.query(
+                `INSERT INTO test_cases
+                   (id, project_id, title, description, steps, expected_result, review_status,
+                    preconditions, priority, test_type, requirement_doc_id, ai_review_metadata, created_at)
+                 VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10, NOW())
+                 RETURNING *`,
+                [
+                  project.id,
+                  tc.title,
+                  tc.requirement_description,
+                  JSON.stringify(tc.steps),
+                  tc.expected_result,
+                  tc.preconditions,
+                  tc.priority,
+                  tc.test_type,
+                  savedDoc.id,
+                  tc.ai_review_metadata ? JSON.stringify(tc.ai_review_metadata) : null,
+                ],
+              );
+              if (insertTc.rows[0]) {
+                const row = insertTc.rows[0];
+                createdTestCases.push({
+                  ...row,
+                  title: redactSecrets(row.title),
+                  description: row.description ? redactSecrets(row.description) : null,
+                  preconditions: row.preconditions ? redactSecrets(row.preconditions) : null,
+                  steps: row.steps.map((s: string) => redactSecrets(s)),
+                  expected_result: row.expected_result ? redactSecrets(row.expected_result) : null,
+                });
+              }
+            }
+
+            await client.query(
+              "UPDATE requirement_documents SET generated_count = $1 WHERE id = $2",
+              [createdTestCases.length, savedDoc.id],
+            );
+            await client.query("COMMIT");
+            return createdTestCases;
+          } catch (insertError) {
+            await client.query("ROLLBACK");
+            throw insertError;
+          } finally {
+            client.release();
+          }
         });
       } catch (err) {
         if (err instanceof RequirementsGenerationError) {
@@ -150,54 +213,11 @@ const requirementRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      // Step 5: Save generated test cases with review_status: 'pending'
-      const createdTestCases: any[] = [];
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        for (const tc of generatedCases) {
-          const insertTc = await client.query(
-            `INSERT INTO test_cases
-               (id, project_id, title, description, steps, expected_result, review_status,
-                preconditions, priority, test_type, requirement_doc_id, created_at)
-             VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, NOW())
-             RETURNING *`,
-            [
-              project.id,
-              tc.title,
-              tc.requirement_description,
-              JSON.stringify(tc.steps),
-              tc.expected_result,
-              tc.preconditions,
-              tc.priority,
-              tc.test_type,
-              savedDoc.id,
-            ],
-          );
-          if (insertTc.rows[0]) {
-            const row = insertTc.rows[0];
-            createdTestCases.push({
-              ...row,
-              title: redactSecrets(row.title),
-              description: row.description ? redactSecrets(row.description) : null,
-              preconditions: row.preconditions ? redactSecrets(row.preconditions) : null,
-              steps: row.steps.map((s: string) => redactSecrets(s)),
-              expected_result: row.expected_result ? redactSecrets(row.expected_result) : null,
-            });
-          }
-        }
-
-        await client.query(
-          "UPDATE requirement_documents SET generated_count = $1 WHERE id = $2",
-          [createdTestCases.length, savedDoc.id],
-        );
-        await client.query("COMMIT");
-      } catch (insertError) {
-        await client.query("ROLLBACK");
-        throw insertError;
-      } finally {
-        client.release();
+      if (!lockResult.acquired) {
+        return reply.code(409).send({ error: "Project test generation is already in progress. Please wait for the current run to finish." });
       }
+
+      const createdTestCases = lockResult.result;
 
       // Audit logs
       await logAuditEvent({

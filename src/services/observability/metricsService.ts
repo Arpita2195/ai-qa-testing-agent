@@ -1,5 +1,6 @@
 import { pool } from "../../config/db";
 import { logger } from "./logger";
+import type { AIProviderType } from "../ai/types";
 
 export interface TestExecutionMetric {
   status: "passed" | "failed" | "skipped" | "inconclusive" | "flaky";
@@ -16,6 +17,7 @@ export interface AiUsageRecordParams {
   completionTokens: number;
   durationMs?: number;
   createdBy?: string;
+  provider?: AIProviderType;
 }
 
 export interface AlertRule {
@@ -49,6 +51,11 @@ class MetricsTracker {
   private workerFailuresByProject = new Map<string, number>();
   private apiErrorsByRoute: Map<string, number> = new Map();
   private totalApiRequests: number = 0;
+  private totalCacheHits: number = 0;
+  private totalCacheMisses: number = 0;
+  private cacheHitsByProject: Map<string, number> = new Map();
+  private cacheSavedTokensByProject: Map<string, number> = new Map();
+  private cacheSavedCostByProject: Map<string, number> = new Map();
 
   // Maximum items retained in sliding windows to avoid memory leaks
   private readonly MAX_WINDOW_SIZE = 1000;
@@ -172,6 +179,34 @@ class MetricsTracker {
     };
   }
 
+  trackAiCacheHit(projectId: string, savedTokens: number, savedCostUsd: number): void {
+    this.totalCacheHits++;
+    if (projectId) {
+      this.cacheHitsByProject.set(projectId, (this.cacheHitsByProject.get(projectId) || 0) + 1);
+      this.cacheSavedTokensByProject.set(
+        projectId,
+        (this.cacheSavedTokensByProject.get(projectId) || 0) + savedTokens,
+      );
+      this.cacheSavedCostByProject.set(
+        projectId,
+        (this.cacheSavedCostByProject.get(projectId) || 0) + savedCostUsd,
+      );
+    }
+  }
+
+  trackAiCacheMiss(projectId?: string): void {
+    this.totalCacheMisses++;
+  }
+
+  getCacheStats(projectId?: string) {
+    return {
+      hits: projectId ? this.cacheHitsByProject.get(projectId) || 0 : this.totalCacheHits,
+      misses: this.totalCacheMisses,
+      savedTokens: projectId ? this.cacheSavedTokensByProject.get(projectId) || 0 : Array.from(this.cacheSavedTokensByProject.values()).reduce((a, b) => a + b, 0),
+      savedCostUsd: projectId ? this.cacheSavedCostByProject.get(projectId) || 0 : Array.from(this.cacheSavedCostByProject.values()).reduce((a, b) => a + b, 0),
+    };
+  }
+
   reset(): void {
     this.executionDurations = [];
     this.executionDurationsByProject.clear();
@@ -183,6 +218,11 @@ class MetricsTracker {
     this.workerFailuresByProject.clear();
     this.apiErrorsByRoute.clear();
     this.totalApiRequests = 0;
+    this.totalCacheHits = 0;
+    this.totalCacheMisses = 0;
+    this.cacheHitsByProject.clear();
+    this.cacheSavedTokensByProject.clear();
+    this.cacheSavedCostByProject.clear();
   }
 }
 
@@ -194,28 +234,28 @@ export const inMemoryMetrics = new MetricsTracker();
  * - gemini-2.5-flash / gemini-1.5-flash: $0.075 / 1M prompt tokens, $0.30 / 1M completion tokens.
  * - gemini-1.5-pro: $3.50 / 1M prompt tokens, $10.50 / 1M completion tokens.
  */
-export function calculateEstimatedCostUsd(model: string, promptTokens: number, completionTokens: number): number {
-  const isPro = model.toLowerCase().includes("pro");
-  const promptRatePerMillion = isPro ? 3.5 : 0.075;
-  const completionRatePerMillion = isPro ? 10.5 : 0.3;
+import { calculateEstimatedCostUsd } from "../ai/pricing";
 
-  const promptCost = (promptTokens / 1_000_000) * promptRatePerMillion;
-  const completionCost = (completionTokens / 1_000_000) * completionRatePerMillion;
-  return Number((promptCost + completionCost).toFixed(6));
-}
+export { calculateEstimatedCostUsd };
 
 /**
  * Records AI token usage and estimated cost into the `ai_usage_logs` table.
  */
 export async function recordAiUsage(params: AiUsageRecordParams): Promise<void> {
+  const provider = params.provider || "gemini";
   const totalTokens = params.promptTokens + params.completionTokens;
-  const estimatedCost = calculateEstimatedCostUsd(params.model, params.promptTokens, params.completionTokens);
+  const estimatedCost = calculateEstimatedCostUsd(
+    params.model,
+    params.promptTokens,
+    params.completionTokens,
+    provider,
+  );
 
   try {
     await pool.query(
       `INSERT INTO ai_usage_logs
-         (project_id, feature, model, prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd, duration_ms, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         (project_id, feature, model, prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd, duration_ms, created_by, provider)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         params.projectId || null,
         params.feature,
@@ -226,12 +266,14 @@ export async function recordAiUsage(params: AiUsageRecordParams): Promise<void> 
         estimatedCost,
         params.durationMs ?? null,
         params.createdBy ?? null,
+        provider,
       ],
     );
 
     logger.info("Recorded AI token usage and cost estimate", {
       feature: params.feature,
       model: params.model,
+      provider,
       totalTokens,
       estimatedCostUsd: estimatedCost,
       projectId: params.projectId,
@@ -273,6 +315,7 @@ export async function getSystemMetrics(projectId?: string): Promise<{
     completionTokens: number;
     estimatedCostUsd: number;
     breakdownByFeature: Record<string, { requests: number; tokens: number; costUsd: number }>;
+    cache?: { hits: number; misses: number; savedTokens: number; savedCostUsd: number };
   };
   api: ReturnType<MetricsTracker["getApiStats"]>;
   alerts: ActiveAlert[];
@@ -438,6 +481,7 @@ export async function getSystemMetrics(projectId?: string): Promise<{
       completionTokens: Number(aiRow.completion_tokens),
       estimatedCostUsd: Number(Number(aiRow.total_cost_usd).toFixed(4)),
       breakdownByFeature: featureBreakdown,
+      cache: inMemoryMetrics.getCacheStats(projectId),
     },
     api: inMemoryMetrics.getApiStats(),
     alerts: activeAlerts,

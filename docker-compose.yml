@@ -101,7 +101,7 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_password_123}@postgres:5432/${POSTGRES_DB:-ai_qa_agent}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
-      AI_MODEL: ${AI_MODEL:-gemini-2.5-flash}
+      AI_MODEL: ${AI_MODEL:-gemini-3.1-flash-lite}
       PLATFORM_API_KEY: ${PLATFORM_API_KEY}
       COOKIE_SECRET: ${COOKIE_SECRET:-replace_with_a_secure_cookie_signing_secret_at_least_32_characters}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}

@@ -21,6 +21,7 @@ import {
 import "./App.css";
 import { MonitoringDashboardPage, ProjectJobsTab } from "./components/MonitoringViews";
 import { MobileTestingTab } from "./components/MobileTestingTab";
+import { ReportsTab } from "./components/ReportsTab";
 import {
   describeTestStep,
   isSubmissionOnlyExpectedResult,
@@ -193,6 +194,15 @@ export interface TestCase {
   priority?: "low" | "medium" | "high" | "critical" | string;
   test_type?: "positive" | "negative" | "boundary" | "edge_case" | string | null;
   review_status: string;
+  ai_review_metadata?: {
+    review_status: "reviewed" | "incomplete" | "skipped";
+    reviewer_provider?: string;
+    reviewer_model?: string;
+    verdict?: string;
+    issues?: string[];
+    reason?: string;
+    corrections_applied?: boolean;
+  } | null;
   requirement_doc_id?: string | null;
   created_at?: string;
 }
@@ -922,6 +932,957 @@ function ProjectTeamTab({ projectId }: { projectId: string }) {
   );
 }
 
+interface ProjectAiConfig {
+  projectId: string;
+  provider: "gemini" | "openai" | "ollama" | "groq";
+  model?: string;
+  hasApiKey: boolean;
+  hasPrimaryApiKey?: boolean;
+  hasReviewerApiKey?: boolean;
+  twoStageReviewEnabled?: boolean;
+  reviewModel?: string;
+  baseUrl?: string;
+  isDefault: boolean;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+interface ProjectAiUsageResponse {
+  projectId: string;
+  provider: string;
+  model: string;
+  budget: {
+    allowed: boolean;
+    isWarning: boolean;
+    period: "monthly" | "daily";
+    currentTokens: number;
+    currentCostUsd: number;
+    maxCostLimitUsd: number | null;
+    maxTokenLimit: number | null;
+    costPercentUsed: number;
+    tokenPercentUsed: number;
+    warningThresholdPercent: number;
+    periodStart: string;
+    resetsAt: string;
+  };
+  cache: {
+    totalCachedEntries: number;
+    totalHits: number;
+    savedTokens: number;
+    savedCostUsd: number;
+  };
+}
+
+const PROVIDER_INFO: Record<
+  "gemini" | "openai" | "ollama" | "groq",
+  { name: string; defaultModel: string; suggestedModels: string[]; requiresApiKey: boolean; description: string }
+> = {
+  gemini: {
+    name: "Google Gemini",
+    defaultModel: "gemini-2.5-flash",
+    suggestedModels: ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+    requiresApiKey: true,
+    description: "Multimodal AI by Google DeepMind with high token limits and fast structured generation.",
+  },
+  openai: {
+    name: "OpenAI",
+    defaultModel: "gpt-4o-mini",
+    suggestedModels: ["gpt-4o-mini", "gpt-4o", "o3-mini", "o1"],
+    requiresApiKey: true,
+    description: "Industry-standard GPT models with reasoning and structured output support.",
+  },
+  ollama: {
+    name: "Ollama (Local Models)",
+    defaultModel: "llama3.2",
+    suggestedModels: ["llama3.2", "llama3.1", "mistral", "codellama", "qwen2.5-coder"],
+    requiresApiKey: false,
+    description: "Self-hosted local models with zero per-token API fee and connection-level IP pinning.",
+  },
+  groq: {
+    name: "Groq",
+    defaultModel: "openai/gpt-oss-120b",
+    suggestedModels: ["openai/gpt-oss-120b", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+    requiresApiKey: true,
+    description: "Ultra-low-latency LPU inference running open-weight models at high throughput.",
+  },
+};
+
+function ProjectSettingsTab({ projectId }: { projectId: string }) {
+  const { user } = useAuth();
+  const { data: config, loading, error, reload } = useResource<ProjectAiConfig>(`/projects/${projectId}/ai-config`);
+  const {
+    data: usageData,
+    loading: usageLoading,
+    error: usageError,
+    reload: reloadUsage,
+  } = useResource<ProjectAiUsageResponse>(`/projects/${projectId}/ai-config/usage`);
+
+  const [provider, setProvider] = useState<"gemini" | "openai" | "ollama" | "groq">("gemini");
+  const [model, setModel] = useState<string>("");
+  const [apiKey, setApiKey] = useState<string>("");
+  const [clearApiKey, setClearApiKey] = useState<boolean>(false);
+  const [baseUrl, setBaseUrl] = useState<string>("http://127.0.0.1:11434");
+
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const [twoStageReviewEnabled, setTwoStageReviewEnabled] = useState<boolean>(false);
+  const [reviewModel, setReviewModel] = useState<string>("openai/gpt-oss-120b");
+  const [reviewerApiKey, setReviewerApiKey] = useState<string>("");
+  const [clearReviewerApiKey, setClearReviewerApiKey] = useState<boolean>(false);
+  const [testingReviewer, setTestingReviewer] = useState(false);
+  const [reviewerFeedback, setReviewerFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const [usageLimitPeriod, setUsageLimitPeriod] = useState<"monthly" | "daily">("monthly");
+  const [maxCostLimitUsd, setMaxCostLimitUsd] = useState<string>("");
+  const [maxTokenLimit, setMaxTokenLimit] = useState<string>("");
+  const [warningThresholdPercent, setWarningThresholdPercent] = useState<number>(80);
+  const [cacheEnabled, setCacheEnabled] = useState<boolean>(true);
+  const [cacheTtlSeconds, setCacheTtlSeconds] = useState<number>(86400);
+
+  const [savingLimits, setSavingLimits] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [limitsFeedback, setLimitsFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [cacheFeedback, setCacheFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  useEffect(() => {
+    if (config) {
+      setProvider(config.provider || "gemini");
+      setModel(config.model || PROVIDER_INFO[config.provider || "gemini"].defaultModel);
+      setBaseUrl(config.baseUrl || "http://127.0.0.1:11434");
+      setApiKey("");
+      setClearApiKey(false);
+      setTwoStageReviewEnabled(Boolean(config.twoStageReviewEnabled));
+      setReviewModel(config.reviewModel || "openai/gpt-oss-120b");
+      setReviewerApiKey("");
+      setClearReviewerApiKey(false);
+    }
+  }, [config]);
+
+  useEffect(() => {
+    if (usageData?.budget) {
+      setUsageLimitPeriod(usageData.budget.period || "monthly");
+      setMaxCostLimitUsd(
+        usageData.budget.maxCostLimitUsd !== null && usageData.budget.maxCostLimitUsd !== undefined
+          ? String(usageData.budget.maxCostLimitUsd)
+          : "",
+      );
+      setMaxTokenLimit(
+        usageData.budget.maxTokenLimit !== null && usageData.budget.maxTokenLimit !== undefined
+          ? String(usageData.budget.maxTokenLimit)
+          : "",
+      );
+      setWarningThresholdPercent(usageData.budget.warningThresholdPercent ?? 80);
+    }
+  }, [usageData]);
+
+  const canManage = user?.role === "admin" || user?.role === "qa_manager";
+
+  const handleProviderChange = (newProvider: "gemini" | "openai" | "ollama" | "groq") => {
+    setProvider(newProvider);
+    setModel(PROVIDER_INFO[newProvider].defaultModel);
+    setFeedback(null);
+  };
+
+  const handleTestConnection = async () => {
+    setTesting(true);
+    setFeedback(null);
+    try {
+      const res = await api<{
+        success: boolean;
+        provider: string;
+        model: string;
+        latencyMs?: number;
+        error?: string;
+      }>(`/projects/${projectId}/ai-config/test`, {
+        method: "POST",
+        body: JSON.stringify({
+          provider,
+          model: model.trim() || undefined,
+          apiKey: apiKey.trim() || undefined,
+          baseUrl: provider === "ollama" ? baseUrl.trim() : undefined,
+        }),
+      });
+
+      if (res.success) {
+        setFeedback({
+          type: "success",
+          message: `Connection successful (${res.latencyMs ?? 0}ms latency). Provider: ${res.provider}, Model: ${res.model}.`,
+        });
+      } else {
+        setFeedback({
+          type: "error",
+          message: `Connection test failed: ${res.error || "Unknown provider error"}`,
+        });
+      }
+    } catch (err) {
+      setFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleTestReviewer = async () => {
+    setTestingReviewer(true);
+    setReviewerFeedback(null);
+    try {
+      const res = await api<{
+        success: boolean;
+        provider: string;
+        model: string;
+        latencyMs?: number;
+        error?: string;
+      }>(`/projects/${projectId}/ai-config/test`, {
+        method: "POST",
+        body: JSON.stringify({
+          testReviewer: true,
+          reviewModel: reviewModel.trim() || undefined,
+          reviewerApiKey: reviewerApiKey.trim() || undefined,
+        }),
+      });
+
+      if (res.success) {
+        setReviewerFeedback({
+          type: "success",
+          message: `Groq reviewer connection successful (${res.latencyMs ?? 0}ms latency). Model: ${res.model}.`,
+        });
+      } else {
+        setReviewerFeedback({
+          type: "error",
+          message: `Groq reviewer test failed: ${res.error || "Unknown error"}`,
+        });
+      }
+    } catch (err) {
+      setReviewerFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setTestingReviewer(false);
+    }
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canManage) return;
+
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await api(`/projects/${projectId}/ai-config`, {
+        method: "PUT",
+        body: JSON.stringify({
+          provider,
+          model: model.trim() || undefined,
+          apiKey: apiKey.trim() || undefined,
+          clearApiKey,
+          baseUrl: provider === "ollama" ? baseUrl.trim() : undefined,
+          twoStageReviewEnabled,
+          reviewModel: reviewModel.trim() || undefined,
+          reviewerApiKey: reviewerApiKey.trim() || undefined,
+          clearReviewerApiKey,
+        }),
+      });
+
+      setFeedback({
+        type: "success",
+        message: "AI provider configuration saved successfully.",
+      });
+      setApiKey("");
+      setClearApiKey(false);
+      setReviewerApiKey("");
+      setClearReviewerApiKey(false);
+      reload();
+      reloadUsage();
+    } catch (err) {
+      setFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!canManage || !window.confirm("Reset this project to the default Gemini AI provider?")) return;
+
+    setResetting(true);
+    setFeedback(null);
+    try {
+      await api(`/projects/${projectId}/ai-config`, { method: "DELETE" });
+      setFeedback({
+        type: "success",
+        message: "Project reset to default Gemini configuration.",
+      });
+      reload();
+      reloadUsage();
+    } catch (err) {
+      setFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const handleSaveLimits = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canManage) return;
+
+    setSavingLimits(true);
+    setLimitsFeedback(null);
+    try {
+      await api(`/projects/${projectId}/ai-config/limits`, {
+        method: "PUT",
+        body: JSON.stringify({
+          usageLimitPeriod,
+          maxCostLimitUsd: maxCostLimitUsd.trim() ? parseFloat(maxCostLimitUsd) : null,
+          maxTokenLimit: maxTokenLimit.trim() ? parseInt(maxTokenLimit, 10) : null,
+          warningThresholdPercent: Number(warningThresholdPercent) || 80,
+          cacheEnabled,
+          cacheTtlSeconds: Number(cacheTtlSeconds) || 86400,
+        }),
+      });
+
+      setLimitsFeedback({
+        type: "success",
+        message: "AI budget limits and optimization settings updated successfully.",
+      });
+      reloadUsage();
+    } catch (err) {
+      setLimitsFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSavingLimits(false);
+    }
+  };
+
+  const handleClearCache = async () => {
+    if (!canManage || !window.confirm("Flush all cached AI responses for this project?")) return;
+
+    setClearingCache(true);
+    setCacheFeedback(null);
+    try {
+      const res = await api<{ success: boolean; clearedEntries: number; message: string }>(
+        `/projects/${projectId}/ai-config/cache/clear`,
+        { method: "POST" },
+      );
+      setCacheFeedback({
+        type: "success",
+        message: res.message || `Flushed ${res.clearedEntries} cached entries.`,
+      });
+      reloadUsage();
+    } catch (err) {
+      setCacheFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setClearingCache(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: "16px" }}>
+      {!canManage && (
+        <div className="auth-notice-banner" style={{ marginBottom: "16px" }}>
+          <span>
+            <strong>Read-Only Access:</strong> Modifying the project AI provider configuration requires Administrator or QA Manager role.
+          </span>
+        </div>
+      )}
+
+      <State loading={loading || usageLoading} error={error || usageError}>
+        {/* Provider Config Card */}
+        <div className="card" style={{ padding: "20px", marginBottom: "20px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+            <h3 style={{ margin: 0 }}>AI Provider Configuration</h3>
+            <span
+              className={`role-tag role-${config?.isDefault ? "viewer" : "qa_manager"}`}
+              style={{ fontSize: "0.85rem", textTransform: "uppercase" }}
+            >
+              {config?.isDefault ? "Default Configuration" : "Custom Configured"}
+            </span>
+          </div>
+
+          <p className="muted" style={{ marginTop: 0, marginBottom: "16px" }}>
+            Select and configure the AI provider used for all automated test generation, loop generation, requirements analysis, and failure triage in this project.
+          </p>
+
+          <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            <div>
+              <label htmlFor="ai-provider-select" style={{ display: "block", fontWeight: 600, marginBottom: "6px" }}>
+                AI Provider
+              </label>
+              <select
+                id="ai-provider-select"
+                aria-label="AI Provider"
+                value={provider}
+                onChange={(e) => handleProviderChange(e.target.value as any)}
+                disabled={!canManage || saving || testing}
+                style={{ width: "100%", maxWidth: "420px", padding: "8px", borderRadius: "4px" }}
+              >
+                <option value="gemini">Google Gemini</option>
+                <option value="openai">OpenAI</option>
+                <option value="ollama">Ollama (Local Models)</option>
+                <option value="groq">Groq</option>
+              </select>
+              <p className="muted" style={{ fontSize: "0.85rem", marginTop: "4px" }}>
+                {PROVIDER_INFO[provider].description}
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="ai-model-input" style={{ display: "block", fontWeight: 600, marginBottom: "6px" }}>
+                Model
+              </label>
+              <div style={{ display: "flex", gap: "8px", maxWidth: "540px" }}>
+                <input
+                  id="ai-model-input"
+                  type="text"
+                  aria-label="Model"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder={PROVIDER_INFO[provider].defaultModel}
+                  disabled={!canManage || saving || testing}
+                  style={{ flex: 1, padding: "8px", borderRadius: "4px" }}
+                />
+                <select
+                  aria-label="Suggested Models"
+                  value={PROVIDER_INFO[provider].suggestedModels.includes(model) ? model : ""}
+                  onChange={(e) => {
+                    if (e.target.value) setModel(e.target.value);
+                  }}
+                  disabled={!canManage || saving || testing}
+                  style={{ width: "180px", padding: "8px", borderRadius: "4px" }}
+                >
+                  <option value="">Suggestions...</option>
+                  {PROVIDER_INFO[provider].suggestedModels.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {provider === "ollama" && (
+              <div>
+                <label htmlFor="ai-base-url-input" style={{ display: "block", fontWeight: 600, marginBottom: "6px" }}>
+                  Ollama Base URL
+                </label>
+                <input
+                  id="ai-base-url-input"
+                  type="url"
+                  aria-label="Ollama Base URL"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="http://127.0.0.1:11434"
+                  disabled={!canManage || saving || testing}
+                  style={{ width: "100%", maxWidth: "540px", padding: "8px", borderRadius: "4px" }}
+                />
+                <p className="muted" style={{ fontSize: "0.85rem", marginTop: "4px" }}>
+                  Localhost and internal endpoints are supported. Connection-level IP pinning and SSRF protection are strictly enforced.
+                </p>
+              </div>
+            )}
+
+            <div>
+              <label htmlFor="ai-api-key-input" style={{ display: "block", fontWeight: 600, marginBottom: "6px" }}>
+                API Key {provider === "ollama" ? "(Optional)" : ""}
+              </label>
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxWidth: "540px" }}>
+                <input
+                  id="ai-api-key-input"
+                  type="password"
+                  aria-label="API Key"
+                  value={apiKey}
+                  onChange={(e) => {
+                    setApiKey(e.target.value);
+                    if (clearApiKey) setClearApiKey(false);
+                  }}
+                  placeholder={
+                    config?.hasApiKey
+                      ? "•••••••• (Key saved in encrypted storage — leave blank to keep)"
+                      : `Enter ${PROVIDER_INFO[provider].name} API key`
+                  }
+                  disabled={!canManage || saving || testing || clearApiKey}
+                  style={{ padding: "8px", borderRadius: "4px" }}
+                />
+                {config?.hasApiKey && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85rem" }}>
+                    <span style={{ color: "#16a34a" }}>✓ Custom encrypted API key is saved</span>
+                    {canManage && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        style={{ padding: "2px 8px", fontSize: "0.75rem" }}
+                        onClick={() => {
+                          setClearApiKey(!clearApiKey);
+                          setApiKey("");
+                        }}
+                      >
+                        {clearApiKey ? "Keep existing key" : "Remove saved key"}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {clearApiKey && (
+                  <p style={{ color: "#dc2626", fontSize: "0.85rem", margin: 0 }}>
+                    API key will be removed upon saving. The provider will fall back to server environment variables if available.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Two-Stage AI Generation & Quality Review Section */}
+            <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: "16px", marginTop: "8px" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                <div>
+                  <h4 style={{ margin: "0 0 4px 0", fontSize: "1rem" }}>Two-Stage AI Generation & Quality Review</h4>
+                  <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+                    Enable independent review of Gemini-generated test cases using Groq (openai/gpt-oss-120b) for higher accuracy, edge-case validation, and anti-hallucination checks.
+                  </p>
+                </div>
+                <label style={{ display: "flex", alignItems: "center", cursor: canManage ? "pointer" : "default", gap: "8px" }}>
+                  <input
+                    type="checkbox"
+                    checked={twoStageReviewEnabled}
+                    onChange={(e) => setTwoStageReviewEnabled(e.target.checked)}
+                    disabled={!canManage || saving || testing}
+                    style={{ width: "18px", height: "18px" }}
+                  />
+                  <span style={{ fontWeight: 600, fontSize: "0.9rem" }}>{twoStageReviewEnabled ? "Enabled" : "Disabled"}</span>
+                </label>
+              </div>
+
+              {twoStageReviewEnabled && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginTop: "12px", background: "#f8fafc", padding: "12px", borderRadius: "6px" }}>
+                  <div>
+                    <label htmlFor="review-model-input" style={{ display: "block", fontWeight: 600, marginBottom: "4px", fontSize: "0.88rem" }}>
+                      Groq Reviewer Model
+                    </label>
+                    <input
+                      id="review-model-input"
+                      type="text"
+                      aria-label="Groq Reviewer Model"
+                      value={reviewModel}
+                      onChange={(e) => setReviewModel(e.target.value)}
+                      placeholder="openai/gpt-oss-120b"
+                      disabled={!canManage || saving || testing}
+                      style={{ width: "100%", maxWidth: "420px", padding: "6px 8px", borderRadius: "4px" }}
+                    />
+                    <p className="muted" style={{ fontSize: "0.8rem", marginTop: "2px" }}>
+                      Default: openai/gpt-oss-120b (MoE production model on Groq LPU).
+                    </p>
+                  </div>
+
+                  <div>
+                    <label htmlFor="reviewer-api-key-input" style={{ display: "block", fontWeight: 600, marginBottom: "4px", fontSize: "0.88rem" }}>
+                      Groq Reviewer API Key
+                    </label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px", maxWidth: "420px" }}>
+                      <input
+                        id="reviewer-api-key-input"
+                        type="password"
+                        aria-label="Groq Reviewer API Key"
+                        value={reviewerApiKey}
+                        onChange={(e) => {
+                          setReviewerApiKey(e.target.value);
+                          if (clearReviewerApiKey) setClearReviewerApiKey(false);
+                        }}
+                        placeholder={
+                          config?.hasReviewerApiKey
+                            ? "•••••••• (Groq key saved in encrypted storage — leave blank to keep)"
+                            : "Enter Groq API key for reviewer"
+                        }
+                        disabled={!canManage || saving || testing || clearReviewerApiKey}
+                        style={{ padding: "6px 8px", borderRadius: "4px" }}
+                      />
+                      {config?.hasReviewerApiKey && (
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.82rem" }}>
+                          <span style={{ color: "#16a34a" }}>✓ Groq reviewer key is configured</span>
+                          {canManage && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              style={{ padding: "1px 6px", fontSize: "0.75rem" }}
+                              onClick={() => {
+                                setClearReviewerApiKey(!clearReviewerApiKey);
+                                setReviewerApiKey("");
+                              }}
+                            >
+                              {clearReviewerApiKey ? "Keep existing key" : "Remove reviewer key"}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {clearReviewerApiKey && (
+                        <p style={{ color: "#dc2626", fontSize: "0.8rem", margin: 0 }}>
+                          Groq reviewer key will be removed upon saving.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {reviewerFeedback && (
+                    <div
+                      className={`notice ${reviewerFeedback.type === "error" ? "error" : ""}`}
+                      style={{ maxWidth: "500px", padding: "8px 12px", margin: 0, fontSize: "0.85rem" }}
+                    >
+                      {reviewerFeedback.message}
+                    </div>
+                  )}
+
+                  <div>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={handleTestReviewer}
+                      disabled={testingReviewer || saving}
+                      style={{ padding: "4px 10px", fontSize: "0.82rem" }}
+                    >
+                      {testingReviewer ? "Testing Groq Reviewer..." : "Test Groq Reviewer"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {feedback && (
+              <div
+                className={`notice ${feedback.type === "error" ? "error" : ""}`}
+                style={{ maxWidth: "600px", padding: "10px 14px", marginTop: "4px" }}
+              >
+                {feedback.message}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: "10px", marginTop: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="secondary"
+                onClick={handleTestConnection}
+                disabled={testing || saving}
+              >
+                {testing ? "Testing Connection..." : "Test Connection"}
+              </button>
+              {canManage && (
+                <>
+                  <button type="submit" disabled={saving || testing}>
+                    {saving ? "Saving..." : "Save Configuration"}
+                  </button>
+                  {!config?.isDefault && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={handleReset}
+                      disabled={resetting || saving || testing}
+                      style={{ color: "#dc2626" }}
+                    >
+                      {resetting ? "Reset..." : "Reset to Gemini Default"}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </form>
+        </div>
+
+        {/* AI Budget & Usage Controls Card */}
+        <div className="card" style={{ padding: "20px", marginBottom: "20px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px", flexWrap: "wrap", gap: "8px" }}>
+            <h3 style={{ margin: 0 }}>AI Budget & Usage Controls</h3>
+            {usageData?.budget && (
+              <span
+                className="role-tag"
+                style={{
+                  fontSize: "0.85rem",
+                  background: !usageData.budget.allowed ? "#fef2f2" : usageData.budget.isWarning ? "#fffbeb" : "#f0fdf4",
+                  color: !usageData.budget.allowed ? "#b91c1c" : usageData.budget.isWarning ? "#b45309" : "#15803d",
+                  border: `1px solid ${!usageData.budget.allowed ? "#fecaca" : usageData.budget.isWarning ? "#fde68a" : "#bbf7d0"}`,
+                }}
+              >
+                {!usageData.budget.allowed ? "Hard Limit Exceeded (Blocked)" : usageData.budget.isWarning ? "Warning Threshold Reached" : "Budget Healthy"}
+              </span>
+            )}
+          </div>
+
+          <p className="muted" style={{ marginTop: 0, marginBottom: "16px" }}>
+            Monitor real provider token and cost consumption. Configure daily or monthly spending caps with strict backend enforcement to prevent runaway API billing.
+          </p>
+
+          {usageData?.budget ? (
+            <div>
+              {/* Progress Bar */}
+              {(() => {
+                const percent = Math.min(100, Math.max(usageData.budget.costPercentUsed, usageData.budget.tokenPercentUsed));
+                const barColor = percent >= 100 ? "#ef4444" : percent >= usageData.budget.warningThresholdPercent ? "#f59e0b" : "#10b981";
+                return (
+                  <div style={{ marginBottom: "16px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
+                      <span>Budget Consumed ({usageData.budget.period})</span>
+                      <span>{percent.toFixed(1)}%</span>
+                    </div>
+                    <div style={{ height: "10px", borderRadius: "5px", background: "#e5e7eb", overflow: "hidden" }}>
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${Math.max(2, percent)}%`,
+                          background: barColor,
+                          transition: "width 0.3s ease",
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Usage Metrics Grid */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px", marginBottom: "20px" }}>
+                <div style={{ background: "rgba(0,0,0,0.02)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase", fontWeight: 600 }}>Estimated Cost Consumed</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "4px" }}>
+                    ${usageData.budget.currentCostUsd.toFixed(4)}
+                  </div>
+                  <div className="muted" style={{ fontSize: "0.8rem" }}>
+                    Cap: {usageData.budget.maxCostLimitUsd !== null ? `$${usageData.budget.maxCostLimitUsd.toFixed(2)}` : "Unlimited"}
+                  </div>
+                </div>
+
+                <div style={{ background: "rgba(0,0,0,0.02)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase", fontWeight: 600 }}>Tokens Consumed</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "4px" }}>
+                    {usageData.budget.currentTokens.toLocaleString()}
+                  </div>
+                  <div className="muted" style={{ fontSize: "0.8rem" }}>
+                    Cap: {usageData.budget.maxTokenLimit !== null ? usageData.budget.maxTokenLimit.toLocaleString() : "Unlimited"}
+                  </div>
+                </div>
+
+                <div style={{ background: "rgba(0,0,0,0.02)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase", fontWeight: 600 }}>Accounting Window</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "4px", textTransform: "capitalize" }}>
+                    {usageData.budget.period}
+                  </div>
+                  <div className="muted" style={{ fontSize: "0.8rem" }}>
+                    Resets: {new Date(usageData.budget.resetsAt).toLocaleDateString()}
+                  </div>
+                </div>
+              </div>
+
+              {/* Budget Configuration Form */}
+              {canManage && (
+                <form onSubmit={handleSaveLimits} style={{ borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: "16px" }}>
+                  <h4 style={{ margin: "0 0 12px 0", fontSize: "0.95rem" }}>Update Budget Caps & Thresholds</h4>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px", marginBottom: "12px" }}>
+                    <div>
+                      <label htmlFor="budget-period-select" style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
+                        Accounting Period
+                      </label>
+                      <select
+                        id="budget-period-select"
+                        value={usageLimitPeriod}
+                        onChange={(e) => setUsageLimitPeriod(e.target.value as "monthly" | "daily")}
+                        style={{ width: "100%", padding: "6px", borderRadius: "4px" }}
+                      >
+                        <option value="monthly">Monthly Cycle</option>
+                        <option value="daily">Daily Cycle</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="budget-max-cost" style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
+                        Max Cost Cap (USD)
+                      </label>
+                      <input
+                        id="budget-max-cost"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        placeholder="e.g. 50.00 (empty = none)"
+                        value={maxCostLimitUsd}
+                        onChange={(e) => setMaxCostLimitUsd(e.target.value)}
+                        style={{ width: "100%", padding: "6px", borderRadius: "4px" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="budget-max-tokens" style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
+                        Max Token Cap
+                      </label>
+                      <input
+                        id="budget-max-tokens"
+                        type="number"
+                        step="1000"
+                        min="0"
+                        placeholder="e.g. 5000000 (empty = none)"
+                        value={maxTokenLimit}
+                        onChange={(e) => setMaxTokenLimit(e.target.value)}
+                        style={{ width: "100%", padding: "6px", borderRadius: "4px" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="budget-warning-thresh" style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
+                        Warning Alert Threshold (%)
+                      </label>
+                      <input
+                        id="budget-warning-thresh"
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={warningThresholdPercent}
+                        onChange={(e) => setWarningThresholdPercent(Number(e.target.value))}
+                        style={{ width: "100%", padding: "6px", borderRadius: "4px" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="budget-cache-ttl" style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "4px" }}>
+                        Cache TTL (Seconds)
+                      </label>
+                      <input
+                        id="budget-cache-ttl"
+                        type="number"
+                        min="60"
+                        max="2592000"
+                        value={cacheTtlSeconds}
+                        onChange={(e) => setCacheTtlSeconds(Number(e.target.value))}
+                        style={{ width: "100%", padding: "6px", borderRadius: "4px" }}
+                      />
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "24px" }}>
+                      <input
+                        id="budget-cache-enabled"
+                        type="checkbox"
+                        checked={cacheEnabled}
+                        onChange={(e) => setCacheEnabled(e.target.checked)}
+                      />
+                      <label htmlFor="budget-cache-enabled" style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                        Enable AI Response Caching
+                      </label>
+                    </div>
+                  </div>
+
+                  {limitsFeedback && (
+                    <div
+                      className={`notice ${limitsFeedback.type === "error" ? "error" : ""}`}
+                      style={{ padding: "8px 12px", marginBottom: "12px", fontSize: "0.85rem" }}
+                    >
+                      {limitsFeedback.message}
+                    </div>
+                  )}
+
+                  <button type="submit" disabled={savingLimits}>
+                    {savingLimits ? "Saving Caps..." : "Save Budget Limits"}
+                  </button>
+                </form>
+              )}
+            </div>
+          ) : (
+            <p className="muted">Loading budget details...</p>
+          )}
+        </div>
+
+        {/* AI Response Caching & Cost Savings Card */}
+        <div className="card" style={{ padding: "20px", marginBottom: "20px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px", flexWrap: "wrap", gap: "8px" }}>
+            <h3 style={{ margin: 0 }}>AI Response Caching & Cost Savings</h3>
+            <span
+              className="role-tag"
+              style={{
+                fontSize: "0.85rem",
+                background: "#eff6ff",
+                color: "#1d4ed8",
+                border: "1px solid #bfdbfe",
+              }}
+            >
+              Zero-Billing On Hits
+            </span>
+          </div>
+
+          <p className="muted" style={{ marginTop: 0, marginBottom: "16px" }}>
+            Identical generation requests are served directly from project-isolated cache, cutting API latency to near-zero and eliminating redundant provider fees.
+          </p>
+
+          {usageData?.cache ? (
+            <div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "16px" }}>
+                <div style={{ background: "rgba(0,0,0,0.02)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase", fontWeight: 600 }}>Active Cached Entries</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "4px" }}>
+                    {usageData.cache.totalCachedEntries}
+                  </div>
+                </div>
+
+                <div style={{ background: "rgba(0,0,0,0.02)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase", fontWeight: 600 }}>Total Cache Hits</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "4px" }}>
+                    {usageData.cache.totalHits}
+                  </div>
+                </div>
+
+                <div style={{ background: "rgba(0,0,0,0.02)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase", fontWeight: 600 }}>Tokens Saved</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "4px", color: "#16a34a" }}>
+                    {usageData.cache.savedTokens.toLocaleString()}
+                  </div>
+                </div>
+
+                <div style={{ background: "rgba(0,0,0,0.02)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase", fontWeight: 600 }}>Estimated Cost Saved</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "4px", color: "#16a34a" }}>
+                    ${usageData.cache.savedCostUsd.toFixed(4)}
+                  </div>
+                </div>
+              </div>
+
+              {cacheFeedback && (
+                <div
+                  className={`notice ${cacheFeedback.type === "error" ? "error" : ""}`}
+                  style={{ padding: "8px 12px", marginBottom: "12px", fontSize: "0.85rem" }}
+                >
+                  {cacheFeedback.message}
+                </div>
+              )}
+
+              {canManage && (
+                <div style={{ display: "flex", gap: "10px", alignItems: "center", borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: "14px" }}>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleClearCache}
+                    disabled={clearingCache}
+                    style={{ color: "#dc2626" }}
+                  >
+                    {clearingCache ? "Flushing Cache..." : "Flush AI Response Cache"}
+                  </button>
+                  <span className="muted" style={{ fontSize: "0.8rem" }}>
+                    Flushing forces fresh test generation from the configured provider on subsequent runs.
+                  </span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="muted">Loading cache metrics...</p>
+          )}
+        </div>
+      </State>
+    </div>
+  );
+}
+
 function Layout() {
   const { user, logout } = useAuth();
   const { pathname } = useLocation();
@@ -1083,7 +2044,7 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
     try {
       const result = await api<GenerateResponse>(`/projects/${projectId}/generate`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ loop: true, resume: true }),
       });
       setProgress(formatGenerationMessage(result));
       const cases = await api<TestCase[]>(`/projects/${projectId}/test-cases`);
@@ -1450,6 +2411,32 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
                   <strong>{tc.title}</strong>
                   <p>{tc.description}</p>
                   <span className={`badge ${tc.review_status}`}>{tc.review_status}</span>
+                  {tc.ai_review_metadata && (
+                    <span
+                      className="badge"
+                      style={{
+                        marginLeft: "6px",
+                        fontSize: "0.75rem",
+                        backgroundColor:
+                          tc.ai_review_metadata.review_status === "reviewed"
+                            ? "#dcfce7"
+                            : tc.ai_review_metadata.review_status === "incomplete"
+                            ? "#fef3c7"
+                            : "#f3f4f6",
+                        color:
+                          tc.ai_review_metadata.review_status === "reviewed"
+                            ? "#15803d"
+                            : tc.ai_review_metadata.review_status === "incomplete"
+                            ? "#b45309"
+                            : "#4b5563",
+                      }}
+                    >
+                      AI: {tc.ai_review_metadata.review_status === "reviewed"
+                        ? (tc.ai_review_metadata.verdict || "Reviewed")
+                        : tc.ai_review_metadata.review_status}
+                      {tc.ai_review_metadata.corrections_applied ? " (Corrected)" : ""}
+                    </span>
+                  )}
                 </div>
                 <div className="actions">
                   {tc.review_status === "pending" && (
@@ -1837,7 +2824,7 @@ function ProjectAccessBar({ project, onUpdate }: { project: Project; onUpdate: (
   );
 }
 
-const tabs = ["Test Cases", "Requirements", "Automations", "API Endpoints", "Mobile Testing", "Suites", "Schedules", "Runs", "Visual", "Jobs & Monitoring", "Team"] as const;
+const tabs = ["Test Cases", "Requirements", "Automations", "API Endpoints", "Mobile Testing", "Suites", "Schedules", "Runs", "Reports", "Visual", "Jobs & Monitoring", "Team", "Settings"] as const;
 type ProjectTab = (typeof tabs)[number];
 
 function ProjectPage() {
@@ -1897,9 +2884,11 @@ function ProjectPage() {
             {activeTab === "Suites" && <SuitesTab projectId={id} />}
             {activeTab === "Schedules" && <SchedulesTab projectId={id} />}
             {activeTab === "Runs" && <RunsTab projectId={id} />}
+            {activeTab === "Reports" && <ReportsTab projectId={id} />}
             {activeTab === "Visual" && <VisualTab projectId={id} />}
             {activeTab === "Jobs & Monitoring" && <ProjectJobsTab projectId={id} />}
             {activeTab === "Team" && <ProjectTeamTab projectId={id} />}
+            {activeTab === "Settings" && <ProjectSettingsTab projectId={id} />}
           </>
         )}
       </State>
@@ -1911,11 +2900,21 @@ interface GenerateResponse {
   created: number;
   skipped_invalid: number;
   skipped_duplicate: number;
-  generation_mode?: "ai" | "fallback" | "mixed";
+  generation_mode?: "ai" | "fallback" | "mixed" | "loop_based";
+  total_functionalities?: number;
+  completed_functionalities?: number;
+  scenarios_planned?: number;
+  scenarios_generated?: number;
+  missing_scenarios?: number;
   test_cases: TestCase[];
 }
 
 function formatGenerationMessage(result: GenerateResponse): string {
+  if (result.generation_mode === "loop_based") {
+    const funcs = result.completed_functionalities ?? result.total_functionalities ?? 1;
+    const scen = result.scenarios_generated ?? result.created;
+    return `Generated ${result.created} pending test cases across ${funcs} functionalities (${scen} scenarios planned & verified, ${result.skipped_duplicate} skipped duplicate).`;
+  }
   const summary = `Generated ${result.created} pending test cases (${result.skipped_invalid} skipped invalid, ${result.skipped_duplicate} skipped duplicate).`;
   if (result.generation_mode === "fallback") {
     return `${summary} Gemini was temporarily unavailable, so basic page-load checks were used. Review them before approval.`;
@@ -1930,6 +2929,7 @@ function TestCasesTab({ projectId }: { projectId: string }) {
   const { data, loading, error, reload } = useResource<TestCase[]>(`/projects/${projectId}/test-cases`);
   const [message, setMessage] = useState("");
   const [pagePath, setPagePath] = useState("");
+  const [enableCrawl, setEnableCrawl] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [runningAll, setRunningAll] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -1981,9 +2981,18 @@ function TestCasesTab({ projectId }: { projectId: string }) {
 
   async function generate() {
     setGenerating(true);
-    setMessage("Generating test cases (crawling pages and calling AI, this may take up to 2 minutes)…");
+    setMessage(
+      enableCrawl
+        ? "Autonomously crawling site and generating test cases (this may take up to 2-3 minutes)…"
+        : "Generating test cases (discovering functionalities and planning scenarios, this may take up to 2 minutes)…",
+    );
     try {
-      const body = pagePath.trim() ? { path: pagePath.trim() } : {};
+      const body = {
+        path: pagePath.trim() || undefined,
+        loop: true,
+        resume: true,
+        crawl: enableCrawl,
+      };
       const result = await api<GenerateResponse>(`/projects/${projectId}/generate`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -2045,6 +3054,15 @@ function TestCasesTab({ projectId }: { projectId: string }) {
             disabled={generating || runningAll}
             aria-label="Page path"
           />
+          <label style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.85rem", cursor: "pointer", userSelect: "none" }}>
+            <input
+              type="checkbox"
+              checked={enableCrawl}
+              onChange={(e) => setEnableCrawl(e.target.checked)}
+              disabled={generating || runningAll}
+            />
+            Recursive Crawl
+          </label>
           <button onClick={generate} disabled={generating || runningAll}>
             {generating ? "Generating…" : "Generate"}
           </button>
@@ -2091,6 +3109,32 @@ function TestCasesTab({ projectId }: { projectId: string }) {
                 </p>
               )}
               <span className={`badge ${testCase.review_status}`}>{testCase.review_status}</span>
+              {testCase.ai_review_metadata && (
+                <span
+                  className="badge"
+                  style={{
+                    marginLeft: "6px",
+                    fontSize: "0.75rem",
+                    backgroundColor:
+                      testCase.ai_review_metadata.review_status === "reviewed"
+                        ? "#dcfce7"
+                        : testCase.ai_review_metadata.review_status === "incomplete"
+                        ? "#fef3c7"
+                        : "#f3f4f6",
+                    color:
+                      testCase.ai_review_metadata.review_status === "reviewed"
+                        ? "#15803d"
+                        : testCase.ai_review_metadata.review_status === "incomplete"
+                        ? "#b45309"
+                        : "#4b5563",
+                  }}
+                >
+                  AI: {testCase.ai_review_metadata.review_status === "reviewed"
+                    ? (testCase.ai_review_metadata.verdict || "Reviewed")
+                    : testCase.ai_review_metadata.review_status}
+                  {testCase.ai_review_metadata.corrections_applied ? " (Corrected)" : ""}
+                </span>
+              )}
             </div>
             <div className="actions">
               {testCase.review_status === "pending" && (
@@ -2585,6 +3629,32 @@ function RequirementsTab({ projectId }: { projectId: string }) {
                     </span>
                   )}
                   <span className={`badge ${tc.review_status}`}>{tc.review_status}</span>
+                  {tc.ai_review_metadata && (
+                    <span
+                      className="badge"
+                      style={{
+                        marginLeft: "6px",
+                        fontSize: "0.75rem",
+                        backgroundColor:
+                          tc.ai_review_metadata.review_status === "reviewed"
+                            ? "#dcfce7"
+                            : tc.ai_review_metadata.review_status === "incomplete"
+                            ? "#fef3c7"
+                            : "#f3f4f6",
+                        color:
+                          tc.ai_review_metadata.review_status === "reviewed"
+                            ? "#15803d"
+                            : tc.ai_review_metadata.review_status === "incomplete"
+                            ? "#b45309"
+                            : "#4b5563",
+                      }}
+                    >
+                      AI: {tc.ai_review_metadata.review_status === "reviewed"
+                        ? (tc.ai_review_metadata.verdict || "Reviewed")
+                        : tc.ai_review_metadata.review_status}
+                      {tc.ai_review_metadata.corrections_applied ? " (Corrected)" : ""}
+                    </span>
+                  )}
                 </div>
 
                 {tc.description && (
