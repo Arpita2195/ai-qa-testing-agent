@@ -9,7 +9,14 @@ import {
   isInfrastructureOrCdnPath,
   isErrorPageContent,
 } from "./urlGuard";
-import { executePageStep, resolveStepPlaceholders, saveRedactedScreenshot } from "./runner";
+import {
+  executePageStep,
+  resolveStepPlaceholders,
+  saveRedactedScreenshot,
+  waitForRealContent,
+} from "./runner";
+
+export { waitForRealContent };
 
 export interface PageElement {
   tag: string;
@@ -87,19 +94,6 @@ export function findLoginElements(elements: PageElement[]): LoginElements | null
   if (!submit) return null;
 
   return { email, password, submit };
-}
-
-export async function waitForRealContent(page: Page, timeout = 30000): Promise<void> {
-  await page.waitForLoadState("domcontentloaded", { timeout });
-  try {
-    await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 5000) });
-  } catch {
-    // networkidle may time out if background polling occurs; domcontentloaded is sufficient
-  }
-  await page.waitForFunction(
-    () => (document.body?.innerText ?? "").trim().length > 0,
-    { timeout: Math.min(timeout, 15000) },
-  );
 }
 
 export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {

@@ -217,6 +217,43 @@ function isCredentialTest(steps: string[], credentials?: AppCredentials): boolea
   );
 }
 
+/**
+ * Waits for modern SPAs (Angular, React, Vue, Next.js, Vite) to bootstrap,
+ * fetch initial data, and paint visible DOM content before scraping or screenshotting.
+ */
+export async function waitForRealContent(page: Page, timeout = 15000): Promise<void> {
+  try {
+    await page.waitForLoadState("domcontentloaded", { timeout });
+  } catch {}
+
+  try {
+    // Wait for initial network settling (XHR/fetch calls for components/data)
+    await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 5000) });
+  } catch {}
+
+  try {
+    // Wait until text or interactive elements are rendered into the DOM
+    await page.waitForFunction(
+      () => {
+        const body = document.body;
+        if (!body) return false;
+        const text = (body.innerText ?? "").trim();
+        if (text.length > 0) return true;
+        const elements = document.querySelectorAll(
+          "input, button, a, img, svg, canvas, table, form, [role='button'], [role='link'], [role='main']",
+        );
+        return elements.length > 0;
+      },
+      { timeout: Math.min(timeout, 10000) },
+    );
+  } catch {}
+
+  // Short pause to ensure paint/animations settle
+  try {
+    await page.waitForTimeout(400);
+  } catch {}
+}
+
 export async function saveRedactedScreenshot(
   page: Page,
   destination = path.resolve(
@@ -226,39 +263,50 @@ export async function saveRedactedScreenshot(
   ),
 ): Promise<string> {
   await mkdir(path.dirname(destination), { recursive: true });
+
+  // Ensure SPA / framework (Angular, React, Vue, Next.js) has rendered content
+  try {
+    await waitForRealContent(page, 10000);
+  } catch {}
+
   const secrets = JSON.stringify(
     [env.STOCKFLOW_TEST_EMAIL, env.STOCKFLOW_TEST_PASSWORD]
       .filter(Boolean)
       .flatMap((secret) => [secret, encodeURIComponent(secret as string)]),
   );
-  await page.evaluate(`(() => {
-    const secrets = ${secrets};
-    for (const input of document.querySelectorAll("input,textarea,[contenteditable='true']")) {
-      for (const secret of secrets) {
-        const value = input.value ?? input.textContent ?? "";
-        if (secret && value.includes(secret)) {
-          if ("value" in input) input.value = value.split(secret).join("[hidden]");
-          else input.textContent = value.split(secret).join("[hidden]");
-        }
-      }
-    }
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      for (const secret of secrets) {
-        if (secret) node.textContent = node.textContent.split(secret).join("[hidden]");
-      }
-    }
-    for (const element of document.querySelectorAll("*")) {
-      for (const attribute of Array.from(element.attributes)) {
+  try {
+    await page.evaluate(`(() => {
+      const secrets = ${secrets};
+      for (const input of document.querySelectorAll("input,textarea,[contenteditable='true']")) {
         for (const secret of secrets) {
-          if (secret && attribute.value.includes(secret)) {
-            element.setAttribute(attribute.name, attribute.value.split(secret).join("[hidden]"));
+          const value = input.value ?? input.textContent ?? "";
+          if (secret && value.includes(secret)) {
+            if ("value" in input) input.value = value.split(secret).join("[hidden]");
+            else input.textContent = value.split(secret).join("[hidden]");
           }
         }
       }
-    }
-  })()`);
+      if (document.body) {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          for (const secret of secrets) {
+            if (secret && node.textContent) node.textContent = node.textContent.split(secret).join("[hidden]");
+          }
+        }
+      }
+      for (const element of document.querySelectorAll("*")) {
+        for (const attribute of Array.from(element.attributes)) {
+          for (const secret of secrets) {
+            if (secret && attribute.value && attribute.value.includes(secret)) {
+              element.setAttribute(attribute.name, attribute.value.split(secret).join("[hidden]"));
+            }
+          }
+        }
+      }
+    })()`);
+  } catch {}
+
   await page.screenshot({ path: destination, fullPage: true });
   return path.relative(path.resolve(__dirname, "../.."), destination);
 }
@@ -388,6 +436,7 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
       const statusText = typeof response.statusText === "function" ? response.statusText() : "";
       throw new Error(`Navigation to "${url}" failed with HTTP ${response.status()}${statusText ? ` (${statusText})` : ""}`);
     }
+    await waitForRealContent(page, 15000);
     return;
   }
 
@@ -399,6 +448,9 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
 
     await (await getStepLocator(page, selector, "click")).click();
     await page.waitForLoadState("domcontentloaded");
+    try {
+      await page.waitForLoadState("networkidle", { timeout: 3000 });
+    } catch {}
     return;
   }
 
@@ -732,8 +784,15 @@ export async function runTestCase(
 
   try {
     context = activeStorageState
-      ? await browser.newContext({ storageState: activeStorageState })
-      : await browser.newContext();
+      ? await browser.newContext({
+          storageState: activeStorageState,
+          viewport: { width: 1280, height: 800 },
+          deviceScaleFactor: 1,
+        })
+      : await browser.newContext({
+          viewport: { width: 1280, height: 800 },
+          deviceScaleFactor: 1,
+        });
     page = await context.newPage();
     attachUrlGuardToPage(page);
 
@@ -787,6 +846,7 @@ export async function runTestCase(
           `Navigation to base URL "${baseUrl}" failed with HTTP ${initialResponse.status()}${statusText ? ` (${statusText})` : ""}`,
         );
       }
+      await waitForRealContent(page, 15000);
       const passwordInput = page.locator('input[type="password"]');
       const hasVisiblePassword =
         (await passwordInput.count()) > 0 && (await passwordInput.first().isVisible());
@@ -825,6 +885,7 @@ export async function runTestCase(
           `Navigation to base URL "${baseUrl}" failed with HTTP ${fallbackResponse.status()}${statusText ? ` (${statusText})` : ""}`,
         );
       }
+      await waitForRealContent(page, 15000);
       await page.waitForLoadState("domcontentloaded");
     }
 
@@ -866,7 +927,10 @@ export async function runTestCase(
       }
     }
 
-    if (evidence.status === "passed" || evidence.status === "failed" || evidence.status === "inconclusive") {
+    if (
+      (evidence.status === "passed" || evidence.status === "failed" || evidence.status === "inconclusive") &&
+      page.url() !== "about:blank"
+    ) {
       const screenshotPath = path.join(outputDirectory, "screenshot.png");
       try {
         await saveRedactedScreenshot(page, screenshotPath);
@@ -907,7 +971,7 @@ export async function runTestCase(
       try {
         evidence.finalUrl = safeUrl(page.url());
         evidence.finalTitle = redactSecrets(await page.title());
-        if (evidence.status !== "passed") {
+        if (evidence.status !== "passed" && page.url() !== "about:blank") {
           await saveRedactedScreenshot(page, path.join(outputDirectory, "screenshot.png"));
           evidence.screenshotPath = relativeEvidencePath(identifiers.runId, identifiers.resultId, "screenshot.png");
         }
