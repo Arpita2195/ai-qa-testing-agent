@@ -4,7 +4,12 @@ import { chromium, type Page } from "@playwright/test";
 import { env } from "../config/env";
 import { performGenericLogin } from "./appAuth";
 import { getProjectAccess } from "./secretStore";
-import { assertTargetUrlAllowed, attachUrlGuardToPage } from "./urlGuard";
+import {
+  assertTargetUrlAllowed,
+  attachUrlGuardToPage,
+  isInfrastructureOrCdnPath,
+  isErrorPageContent,
+} from "./urlGuard";
 
 export type WebResultStatus = "passed" | "failed" | "skipped" | "inconclusive";
 
@@ -375,7 +380,14 @@ export async function executePageStep(page: Page, baseUrl: string, step: string)
 
     const url = `${baseUrl.replace(/\/+$/, "")}/${route.replace(/^\/+/, "")}`;
     await assertTargetUrlAllowed(url);
-    await page.goto(url, { waitUntil: "domcontentloaded" });
+    if (isInfrastructureOrCdnPath(url) || isInfrastructureOrCdnPath(route)) {
+      throw new Error(`Navigation to CDN or infrastructure path is not allowed: "${url}"`);
+    }
+    const response = await page.goto(url, { waitUntil: "domcontentloaded" });
+    if (response && typeof response.status === "function" && response.status() >= 400) {
+      const statusText = typeof response.statusText === "function" ? response.statusText() : "";
+      throw new Error(`Navigation to "${url}" failed with HTTP ${response.status()}${statusText ? ` (${statusText})` : ""}`);
+    }
     return;
   }
 
@@ -768,7 +780,13 @@ export async function runTestCase(
     }
 
     if (!credentialTest) {
-      await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      const initialResponse = await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      if (initialResponse && typeof initialResponse.status === "function" && initialResponse.status() >= 400) {
+        const statusText = typeof initialResponse.statusText === "function" ? initialResponse.statusText() : "";
+        throw new Error(
+          `Navigation to base URL "${baseUrl}" failed with HTTP ${initialResponse.status()}${statusText ? ` (${statusText})` : ""}`,
+        );
+      }
       const passwordInput = page.locator('input[type="password"]');
       const hasVisiblePassword =
         (await passwordInput.count()) > 0 && (await passwordInput.first().isVisible());
@@ -800,7 +818,13 @@ export async function runTestCase(
     }
 
     if (page.url() === "about:blank" && !steps[0]?.startsWith("goto ")) {
-      await page.goto(baseUrl);
+      const fallbackResponse = await page.goto(baseUrl);
+      if (fallbackResponse && typeof fallbackResponse.status === "function" && fallbackResponse.status() >= 400) {
+        const statusText = typeof fallbackResponse.statusText === "function" ? fallbackResponse.statusText() : "";
+        throw new Error(
+          `Navigation to base URL "${baseUrl}" failed with HTTP ${fallbackResponse.status()}${statusText ? ` (${statusText})` : ""}`,
+        );
+      }
       await page.waitForLoadState("domcontentloaded");
     }
 
@@ -829,6 +853,17 @@ export async function runTestCase(
     } catch {
       evidence.finalUrl = "";
       evidence.finalTitle = "";
+    }
+
+    // Post-execution safety check: verify page did not end on an HTTP error page or CDN infrastructure page
+    if (evidence.status === "passed") {
+      if (isErrorPageContent(evidence.finalTitle, [])) {
+        evidence.status = "failed";
+        evidence.errorMessage = `Page displayed an error page: "${evidence.finalTitle}"`;
+      } else if (evidence.finalUrl && isInfrastructureOrCdnPath(evidence.finalUrl)) {
+        evidence.status = "failed";
+        evidence.errorMessage = `Page navigated to an infrastructure path: "${evidence.finalUrl}"`;
+      }
     }
 
     if (evidence.status === "passed" || evidence.status === "failed" || evidence.status === "inconclusive") {

@@ -2,7 +2,13 @@ import crypto from "node:crypto";
 import { chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { pool } from "../config/db";
 import { env } from "../config/env";
-import { assertTargetUrlAllowed, attachUrlGuardToPage, validateTargetUrl } from "./urlGuard";
+import {
+  assertTargetUrlAllowed,
+  attachUrlGuardToPage,
+  validateTargetUrl,
+  isInfrastructureOrCdnPath,
+  isErrorPageContent,
+} from "./urlGuard";
 import { setupAuthenticatedBrowser } from "./appAuth";
 import {
   extractScrapedPage,
@@ -42,6 +48,17 @@ export interface ElementCounts {
   searchBars: number;
   pagination: number;
 }
+
+export const EMPTY_ELEMENT_COUNTS: ElementCounts = {
+  forms: 0,
+  inputs: 0,
+  buttons: 0,
+  links: 0,
+  tables: 0,
+  filters: 0,
+  searchBars: 0,
+  pagination: 0,
+};
 
 export interface CrawlPageResult {
   id?: string;
@@ -426,7 +443,8 @@ async function extractPageLinks(page: Page, allowedOrigin: string): Promise<stri
       }
       return list;
     }, allowedOrigin);
-    return Array.isArray(results) ? results : [];
+    const validLinks = Array.isArray(results) ? results : [];
+    return validLinks.filter((link) => !isInfrastructureOrCdnPath(link));
   } catch {
     return [];
   }
@@ -644,7 +662,11 @@ export async function crawlSite(
             for (const el of row.scraped_data.elements) {
               if (el.tag === "a" && el.href) {
                 const childCanonical = normalizeCanonicalUrl(el.href, baseUrl);
-                if (childCanonical && !isDestructiveActionOrUrl(childCanonical)) {
+                if (
+                  childCanonical &&
+                  !isDestructiveActionOrUrl(childCanonical) &&
+                  !isInfrastructureOrCdnPath(childCanonical)
+                ) {
                   try {
                     if (new URL(childCanonical).origin === allowedOrigin && (row.depth || 0) + 1 <= maxDepth) {
                       if (!queue.some((q) => q.url === childCanonical)) {
@@ -657,8 +679,8 @@ export async function crawlSite(
             }
           }
         } else if (row.status === "failed") {
-          // Failed page: do NOT add to visitedUrls, but re-enqueue to retry!
-          if (!queue.some((q) => q.url === canonical)) {
+          // Failed page: do NOT add to visitedUrls, but re-enqueue to retry if not an infrastructure path!
+          if (!isInfrastructureOrCdnPath(canonical) && !queue.some((q) => q.url === canonical)) {
             queue.push({ url: canonical, depth: row.depth || 0 });
           }
         }
@@ -720,6 +742,11 @@ export async function crawlSite(
           continue;
         }
 
+        // Global Infrastructure & CDN Guard: Never crawl CDN internals (e.g. /cdn-cgi/*)
+        if (isInfrastructureOrCdnPath(canonicalCurrent)) {
+          continue;
+        }
+
         let parsedCurrent: URL;
         try {
           parsedCurrent = new URL(canonicalCurrent);
@@ -739,18 +766,104 @@ export async function crawlSite(
         const pageStartTime = Date.now();
 
         try {
-          // Navigate to current URL
+          // Navigate to current URL and capture HTTP response status
+          let navResponse: import("@playwright/test").Response | null = null;
           if (page.url() !== canonicalCurrent) {
-            await page.goto(canonicalCurrent, { waitUntil: "domcontentloaded", timeout: 20000 });
+            navResponse = await page.goto(canonicalCurrent, { waitUntil: "domcontentloaded", timeout: 20000 });
             await waitForRealContent(page, 15000);
+          }
+
+          // Check if response returned an HTTP error status (4xx/5xx)
+          if (navResponse && typeof navResponse.status === "function" && navResponse.status() >= 400) {
+            const statusText = typeof navResponse.statusText === "function" ? navResponse.statusText() : "";
+            const httpErrorMsg = `HTTP ${navResponse.status()}${statusText ? ` ${statusText}` : ""}`.trim();
+            const pageDurationMs = Date.now() - pageStartTime;
+
+            await saveCrawledPageDb(projectId, {
+              sessionId,
+              url: canonicalCurrent,
+              path: new URL(canonicalCurrent).pathname,
+              depth: current.depth,
+              status: "failed",
+              pageType: "static",
+              elementCounts: EMPTY_ELEMENT_COUNTS,
+              errorMessage: httpErrorMsg,
+              durationMs: pageDurationMs,
+            });
+            crawledPages.push({
+              url: canonicalCurrent,
+              path: new URL(canonicalCurrent).pathname,
+              depth: current.depth,
+              title: "",
+              pageType: "static",
+              elementCounts: EMPTY_ELEMENT_COUNTS,
+              domFingerprint: "",
+              scrapedPage: {
+                url: canonicalCurrent,
+                path: new URL(canonicalCurrent).pathname,
+                title: "",
+                headings: [],
+                text: "",
+                elements: [],
+              },
+              discoveredLinks: [],
+              durationMs: pageDurationMs,
+              status: "failed",
+              error: httpErrorMsg,
+            });
+            continue;
           }
 
           // Handle client-side SPA redirects or URL changes
           const finalUrl = page.url();
           const canonicalFinal = normalizeCanonicalUrl(finalUrl, baseUrl) || canonicalCurrent;
 
+          if (isInfrastructureOrCdnPath(canonicalFinal)) {
+            continue;
+          }
+
           // Extract scraped data
           const scraped = await extractScrapedPage(page);
+
+          // Check if page content represents an HTTP error page (404/500/Cloudflare error)
+          if (
+            isErrorPageContent(scraped.title, scraped.headings, scraped.text) ||
+            isInfrastructureOrCdnPath(scraped.path)
+          ) {
+            const errorMsg = isInfrastructureOrCdnPath(scraped.path)
+              ? `Skipped infrastructure or CDN path: ${scraped.path}`
+              : `Error page detected: ${scraped.title || scraped.path}`;
+            const pageDurationMs = Date.now() - pageStartTime;
+
+            await saveCrawledPageDb(projectId, {
+              sessionId,
+              url: canonicalFinal,
+              path: scraped.path,
+              depth: current.depth,
+              status: "failed",
+              title: scraped.title,
+              pageType: "static",
+              elementCounts: EMPTY_ELEMENT_COUNTS,
+              scrapedData: scraped,
+              errorMessage: errorMsg,
+              durationMs: pageDurationMs,
+            });
+            crawledPages.push({
+              url: canonicalFinal,
+              path: scraped.path,
+              depth: current.depth,
+              title: scraped.title,
+              pageType: "static",
+              elementCounts: EMPTY_ELEMENT_COUNTS,
+              domFingerprint: "",
+              scrapedPage: scraped,
+              discoveredLinks: [],
+              durationMs: pageDurationMs,
+              status: "failed",
+              error: errorMsg,
+            });
+            continue;
+          }
 
           // Classify page type and element counts
           const { pageType, elementCounts } = classifyPageType(
@@ -793,7 +906,7 @@ export async function crawlSite(
             const rawLinks = await extractPageLinks(page, allowedOrigin);
             for (const rawLink of rawLinks) {
               const canonicalLink = normalizeCanonicalUrl(rawLink, baseUrl);
-              if (!canonicalLink) continue;
+              if (!canonicalLink || isInfrastructureOrCdnPath(canonicalLink)) continue;
 
               try {
                 const linkObj = new URL(canonicalLink);

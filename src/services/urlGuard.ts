@@ -984,3 +984,116 @@ export async function safeFetch(
 
   throw new Error(`Too many redirects: exceeded maximum of ${maxRedirects} redirects`);
 }
+
+/**
+ * Detects CDN infrastructure, reverse-proxy internal paths, hot-module reload endpoints,
+ * or non-HTML metadata files that should never be crawled or planned as application features.
+ */
+export function isInfrastructureOrCdnPath(urlOrPath: string): boolean {
+  if (!urlOrPath || typeof urlOrPath !== "string") return false;
+
+  let pathname = urlOrPath.trim();
+  try {
+    if (pathname.startsWith("http://") || pathname.startsWith("https://")) {
+      pathname = new URL(pathname).pathname;
+    } else {
+      pathname = new URL(pathname, "https://example.com").pathname;
+    }
+  } catch {
+    pathname = pathname.split("?")[0].split("#")[0];
+  }
+
+  const lowerPath = pathname.toLowerCase().replace(/\/+$/, "") || "/";
+
+  // Cloudflare CDN / CGI platform routes (e.g. /cdn-cgi, /cdn-cgi/content, /cdn-cgi/challenge-platform, /cdn-cgi/rum, /cdn-cgi/trace)
+  if (lowerPath === "/cdn-cgi" || lowerPath.startsWith("/cdn-cgi/")) {
+    return true;
+  }
+
+  // RFC 8615 well-known endpoints (e.g. /.well-known/acme-challenge, /.well-known/openid-configuration)
+  if (lowerPath === "/.well-known" || lowerPath.startsWith("/.well-known/")) {
+    return true;
+  }
+
+  // Akamai, Fastly, CloudFront telemetry/internal prefixes
+  if (
+    lowerPath === "/akamai" ||
+    lowerPath.startsWith("/akamai/") ||
+    lowerPath === "/fastly" ||
+    lowerPath.startsWith("/fastly/")
+  ) {
+    return true;
+  }
+
+  // Dev server bundler / hot module replacement endpoints
+  if (
+    lowerPath.startsWith("/__webpack_hmr") ||
+    lowerPath.startsWith("/_next/webpack-hmr") ||
+    lowerPath.startsWith("/sockjs-node") ||
+    lowerPath.endsWith("/hot-update.json") ||
+    lowerPath.endsWith(".hot-update.json")
+  ) {
+    return true;
+  }
+
+  // Static browser/crawler metadata files (not application views/pages)
+  const metaFiles = [
+    "/favicon.ico",
+    "/favicon.png",
+    "/favicon.svg",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/sitemap_index.xml",
+    "/service-worker.js",
+    "/sw.js",
+    "/manifest.json",
+    "/site.webmanifest",
+    "/asset-manifest.json",
+    "/browserconfig.xml",
+  ];
+  if (metaFiles.includes(lowerPath)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Detects whether page content (title, headings, text) indicates a standard HTTP error page
+ * (e.g. 404 Not Found, 403 Forbidden, 500 Internal Server Error, Cloudflare error, etc.).
+ */
+export function isErrorPageContent(
+  title?: string,
+  headings: string[] = [],
+  text = "",
+): boolean {
+  const t = (title || "").trim();
+  const h = headings.filter(Boolean).join(" ");
+  const combined = `${t} ${h}`.toLowerCase();
+
+  const errorPatterns = [
+    /\b404\s+not\s+found\b/i,
+    /\bpage\s+not\s+found\b/i,
+    /\b404\s*-\s*not\s+found\b/i,
+    /\b403\s+forbidden\b/i,
+    /\baccess\s+denied\b/i,
+    /\b500\s+internal\s+server\s+error\b/i,
+    /\b502\s+bad\s+gateway\b/i,
+    /\b503\s+service\s+(?:temporarily\s+)?unavailable\b/i,
+    /\b504\s+gateway\s+time-?out\b/i,
+    /\berror\s+404\b/i,
+    /\berror\s+500\b/i,
+    /\bcannot\s+get\s+\//i,
+  ];
+
+  if (errorPatterns.some((pattern) => pattern.test(combined))) {
+    return true;
+  }
+
+  // Cloudflare error page check (title: 404 Not Found, text contains "cloudflare")
+  if (/\b404\b/.test(combined) && /cloudflare/i.test(`${combined} ${text}`)) {
+    return true;
+  }
+
+  return false;
+}

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { pool } from "../config/db";
+import { isInfrastructureOrCdnPath, isErrorPageContent } from "./urlGuard";
 import type { PageElement, PageData, ScrapedPage, SiteData } from "./pageReader";
 
 export interface DiscoveredFunctionality {
@@ -143,8 +144,21 @@ export function discoverPageFunctionalities(
       }
     }
   } catch {}
+
+  // Exclude CDN/infrastructure routes (e.g. /cdn-cgi/*, /.well-known/*)
+  if (isInfrastructureOrCdnPath(pagePath) || (page.url && isInfrastructureOrCdnPath(page.url))) {
+    return [];
+  }
+
   const headings = "headings" in page ? page.headings : [];
   const elements = page.elements || [];
+  const pageTitle = "title" in page ? page.title : "";
+  const pageText = "text" in page ? page.text : "";
+
+  // Exclude error pages (e.g. 404 Not Found, 500 Internal Server Error)
+  if (isErrorPageContent(pageTitle, headings, pageText)) {
+    return [];
+  }
 
   // 1. Identify Login / Authentication Functionality
   const passwordInput = elements.find((el) => el.tag === "input" && el.type === "password");

@@ -243,7 +243,9 @@ export async function runLoopGeneration(
     const pageFuncs = discoverPageFunctionalities(page, projectId);
     for (const func of pageFuncs) {
       const alreadyExists = functionalities.some(
-        (existing) => existing.pagePath === func.pagePath && existing.name === func.name,
+        (existing) =>
+          existing.pagePath === func.pagePath &&
+          (existing.name === func.name || existing.category === func.category),
       );
       if (!alreadyExists) {
         functionalities.push(func);

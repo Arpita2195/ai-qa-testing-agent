@@ -2,7 +2,13 @@ import { chromium, type Page } from "@playwright/test";
 import { env } from "../config/env";
 import { pool } from "../config/db";
 import { setupAuthenticatedBrowser } from "./appAuth";
-import { assertTargetUrlAllowed, attachUrlGuardToPage, validateTargetUrl } from "./urlGuard";
+import {
+  assertTargetUrlAllowed,
+  attachUrlGuardToPage,
+  validateTargetUrl,
+  isInfrastructureOrCdnPath,
+  isErrorPageContent,
+} from "./urlGuard";
 import { executePageStep, resolveStepPlaceholders, saveRedactedScreenshot } from "./runner";
 
 export interface PageElement {
@@ -277,7 +283,7 @@ export async function performStockFlowLogin(
 }
 
 async function findNavigationLinks(page: Page, allowedOrigin: string): Promise<string[]> {
-  return await page.evaluate((origin) => {
+  const rawLinks = await page.evaluate((origin) => {
     const selectors = [
       "aside a[href]",
       "header a[href]",
@@ -342,6 +348,7 @@ async function findNavigationLinks(page: Page, allowedOrigin: string): Promise<s
     }
     return results;
   }, allowedOrigin);
+  return (rawLinks || []).filter((link) => !isInfrastructureOrCdnPath(link));
 }
 
 export async function readSite(
@@ -421,10 +428,16 @@ export async function readSite(
       const targetUrl = new URL(options.path, baseUrl).toString();
       await assertTargetUrlAllowed(targetUrl);
       if (page.url() !== targetUrl) {
-        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        const resp = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        if (resp && typeof resp.status === "function" && resp.status() >= 400) {
+          throw new Error(`Target page "${targetUrl}" failed with HTTP ${resp.status()}`);
+        }
         await waitForRealContent(page, 30000);
       }
       const scraped = await extractScrapedPage(page);
+      if (isErrorPageContent(scraped.title, scraped.headings, scraped.text)) {
+        throw new Error(`Target page "${targetUrl}" loaded an error page: "${scraped.title}"`);
+      }
       return {
         baseUrl,
         isLoggedIn,
@@ -437,7 +450,9 @@ export async function readSite(
     const visitedUrls = new Set<string>();
 
     const landingPage = await extractScrapedPage(page);
-    pages.push(landingPage);
+    if (!isErrorPageContent(landingPage.title, landingPage.headings, landingPage.text) && !isInfrastructureOrCdnPath(landingPage.path)) {
+      pages.push(landingPage);
+    }
     const normalizedLanding = landingPage.url.split("#")[0].split("?")[0];
     visitedUrls.add(normalizedLanding);
 
@@ -452,13 +467,19 @@ export async function readSite(
       if (visitedUrls.has(normalized)) continue;
       visitedUrls.add(normalized);
 
+      if (isInfrastructureOrCdnPath(linkUrl)) continue;
+
       const guard = await validateTargetUrl(linkUrl);
       if (!guard.valid) continue;
 
       try {
-        await page.goto(linkUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        const resp = await page.goto(linkUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        if (resp && typeof resp.status === "function" && resp.status() >= 400) continue;
         await waitForRealContent(page, 30000);
         const subPage = await extractScrapedPage(page);
+        if (isErrorPageContent(subPage.title, subPage.headings, subPage.text) || isInfrastructureOrCdnPath(subPage.path)) {
+          continue;
+        }
         pages.push(subPage);
       } catch (err) {
         console.warn(`Failed to read link page ${linkUrl}:`, err instanceof Error ? err.message : String(err));

@@ -63,6 +63,8 @@ vi.mock("../services/urlGuard", () => ({
     return { valid: true };
   }),
   attachUrlGuardToPage: vi.fn(),
+  isInfrastructureOrCdnPath: vi.fn().mockImplementation((u: string) => u.includes("cdn-cgi")),
+  isErrorPageContent: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("../services/appAuth", () => ({
