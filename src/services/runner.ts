@@ -3,7 +3,7 @@ import path from "node:path";
 import { chromium, type Page } from "@playwright/test";
 import { env } from "../config/env";
 import { performGenericLogin } from "./appAuth";
-import { getProjectAccess } from "./secretStore";
+import { getProjectAccess, setProjectSession } from "./secretStore";
 import {
   assertTargetUrlAllowed,
   attachUrlGuardToPage,
@@ -851,6 +851,13 @@ export async function runTestCase(
           { username, password },
           Boolean(stockFlowCredentials),
         );
+
+        if (options?.projectId && context) {
+          try {
+            const storageState = await context.storageState();
+            await setProjectSession(options.projectId, JSON.stringify(storageState));
+          } catch {}
+        }
       }
     }
 
@@ -864,6 +871,15 @@ export async function runTestCase(
       }
       await waitForRealContent(page, 15000);
       await page.waitForLoadState("domcontentloaded");
+    }
+
+    // Reset baseline / pre-authentication network and console artifacts
+    // so that initial unauthenticated redirects or pre-login probe errors (such as 401 Unauthorized before redirect)
+    // are not attributed to the actual test case execution.
+    if (!credentialTest) {
+      evidence.httpErrors = [];
+      evidence.browserErrors = [];
+      evidence.failedRequests = [];
     }
 
     // Identify the target page navigation step (e.g. "goto /admin-email-templates" or "goto /hangfire-jobs").
