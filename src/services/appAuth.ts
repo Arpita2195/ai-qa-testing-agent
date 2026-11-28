@@ -1,8 +1,9 @@
 import type { Browser, BrowserContext, Locator, Page } from "@playwright/test";
-import { getProjectAccess } from "./secretStore";
+import { getProjectAccess, setProjectSession } from "./secretStore";
 import { assertTargetUrlAllowed, attachUrlGuardToPage } from "./urlGuard";
 import { detectInteractiveAuthNeeds } from "./loginDetector";
 import { isStockFlowUrl } from "./pageReader";
+import { waitForRealContent } from "./pageWait";
 
 async function getStableSelector(locator: Locator): Promise<string> {
   return await locator.evaluate((node: Element): string => {
@@ -188,6 +189,7 @@ export async function setupAuthenticatedBrowser(
 
     try {
       await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await waitForRealContent(page, 15000);
 
       // Verify session is still valid (password input is not visible and not on login page)
       const passwordLocator = page.locator('input[type="password"]');
@@ -220,11 +222,13 @@ export async function setupAuthenticatedBrowser(
   attachUrlGuardToPage(page);
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await waitForRealContent(page, 15000);
 
   const passwordLocator = page.locator('input[type="password"]');
   const hasPasswordInput = (await passwordLocator.count()) > 0 && (await passwordLocator.first().isVisible());
+  const onLoginPath = /\b(login|signin|sign-in|auth|sso)\b/i.test(new URL(page.url()).pathname);
 
-  if (hasPasswordInput) {
+  if (hasPasswordInput || onLoginPath) {
     if (!username || !password) {
       await page.close().catch(() => {});
       await context.close().catch(() => {});
@@ -239,6 +243,12 @@ export async function setupAuthenticatedBrowser(
       { username, password },
       Boolean(isStockflow),
     );
+
+    // Save newly authenticated session state so subsequent page crawls don't need to re-login
+    try {
+      const storageState = await context.storageState();
+      await setProjectSession(projectId, JSON.stringify(storageState));
+    } catch {}
 
     return {
       context,

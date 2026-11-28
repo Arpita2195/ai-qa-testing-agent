@@ -13,8 +13,8 @@ import {
   executePageStep,
   resolveStepPlaceholders,
   saveRedactedScreenshot,
-  waitForRealContent,
 } from "./runner";
+import { waitForRealContent } from "./pageWait";
 
 export { waitForRealContent };
 
@@ -433,6 +433,12 @@ export async function readSite(
         await waitForRealContent(page, 30000);
       }
       const scraped = await extractScrapedPage(page);
+      const isExplicitLoginRequest = /\b(login|signin|sign-in|auth)\b/i.test(requestedPath);
+      if (!isLoggedIn && !isExplicitLoginRequest && (/\b(login|signin|sign-in)\b/i.test(scraped.path) || page.url().includes("returnUrl="))) {
+        throw new Error(
+          `Target page "${targetUrl}" redirected to login (${scraped.url}). Authentication is required to access this page. Please ensure valid credentials or a manual login session are saved for this project.`,
+        );
+      }
       if (isErrorPageContent(scraped.title, scraped.headings, scraped.text)) {
         const errorDetail =
           scraped.headings.find((h) => /not found|404|error|denied|forbidden|oops/i.test(h)) ||
