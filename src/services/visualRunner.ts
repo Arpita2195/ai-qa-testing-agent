@@ -118,7 +118,27 @@ async function readPageEvidence(page: Page): Promise<PageEvidence> {
       .map((element) => (element as HTMLElement).innerText.trim())
       .filter(Boolean),
   );
-  const mainText = mainTexts[0] ?? (await page.locator("body").innerText());
+  let mainText = mainTexts[0];
+  if (!mainText && typeof page.evaluate === "function") {
+    mainText = await page.evaluate(() => {
+      const mainEl = document.querySelector(
+        "main, [role='main'], router-outlet ~ *, .main-content, .layout-main, .page-content, .layout-content, app-root router-outlet ~ *",
+      );
+      if (mainEl && (mainEl as HTMLElement).innerText?.trim()) {
+        return (mainEl as HTMLElement).innerText.trim();
+      }
+      const clone = document.body.cloneNode(true) as HTMLElement;
+      clone
+        .querySelectorAll(
+          "nav, aside, header, [role='navigation'], .sidebar, .layout-sidebar, .p-sidebar, .menu, .layout-menu",
+        )
+        .forEach((el) => el.remove());
+      return clone.innerText?.trim() ?? "";
+    }).catch(() => "");
+  }
+  if (!mainText) {
+    mainText = await page.locator("body").innerText().catch(() => "");
+  }
   return { url: page.url(), title: await page.title(), headings, mainText };
 }
 
@@ -160,7 +180,12 @@ function evidenceMatchesPage(
   allowAliases = false,
 ): boolean {
   const target = normalizePageName(requestedName);
-  const candidates = [evidence.title, ...evidence.headings, evidence.mainText]
+  let pathname = "";
+  try {
+    pathname = normalizePageName(new URL(evidence.url).pathname);
+  } catch {}
+
+  const candidates = [evidence.title, ...evidence.headings, evidence.mainText, pathname]
     .map(normalizePageName)
     .filter(Boolean);
   const aliases: Record<string, string[]> = {
@@ -198,14 +223,26 @@ async function navigateToRequestedPage(
 ): Promise<void> {
   await page.locator("body").waitFor({ state: "visible", timeout: 10000 });
 
-  const directPath = check.path !== "/";
+  let effectivePath = check.path;
+  if ((effectivePath === "/" || !effectivePath) && check.name.startsWith("/")) {
+    effectivePath = check.name;
+  }
+
+  const directPath = effectivePath !== "/";
   if (directPath) {
-    const targetUrl = new URL(check.path, baseUrl);
+    const targetUrl = new URL(effectivePath, baseUrl);
     await assertTargetUrlAllowed(targetUrl.toString());
     await page.goto(targetUrl.toString(), { waitUntil: "domcontentloaded", timeout: 20000 });
     await page.locator("body").waitFor({ state: "visible", timeout: 10000 });
+    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+    if (typeof page.waitForTimeout === "function") {
+      await page.waitForTimeout(500);
+    }
     const evidence = await waitForPageEvidence(page, check.name, true, 40);
     if (!evidence || !urlsMatchTarget(evidence.url, targetUrl)) {
+      if (urlsMatchTarget(page.url(), targetUrl)) {
+        return;
+      }
       throw new Error(
         `Requested page "${check.name}" did not match the requested URL and visible page content after navigating to ${targetUrl.pathname}.`,
       );
@@ -232,12 +269,18 @@ async function navigateToRequestedPage(
   if (candidates.length === 0) {
     const fallbackSelector = "a, button, [role='link'], [role='menuitem']";
     let fallbackItems = await collectNavigationItems(page, fallbackSelector);
+    if (fallbackItems.length > 0 && items.length === 0) {
+      items = fallbackItems;
+    }
     candidates = fallbackItems.filter((item) => normalizePageName(item.label) === target);
     for (let attempt = 0; candidates.length === 0 && attempt < 20; attempt++) {
       await page.waitForTimeout(250);
       initialEvidence = await readPageEvidence(page);
       if (evidenceMatchesPage(initialEvidence, check.name)) return;
       fallbackItems = await collectNavigationItems(page, fallbackSelector);
+      if (fallbackItems.length > 0 && items.length === 0) {
+        items = fallbackItems;
+      }
       candidates = fallbackItems.filter((item) => normalizePageName(item.label) === target);
     }
     if (candidates.length === 1) {

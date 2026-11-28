@@ -43,6 +43,15 @@ async function executeVisualCheck(
   check: VisualCheckRow,
   runId: string,
 ): Promise<Record<string, unknown>> {
+  let checkToRun = check;
+  if (check.path === "/" && check.name.startsWith("/")) {
+    const resolvedPath = check.name.trim();
+    try {
+      await pool.query("UPDATE visual_checks SET path = $1 WHERE id = $2", [resolvedPath, check.id]);
+      checkToRun = { ...check, path: resolvedPath };
+    } catch {}
+  }
+
   const baselineResult = await pool.query<VisualBaseline>(
     `SELECT id, image_path FROM visual_baselines
      WHERE check_id = $1 AND status = 'approved'
@@ -50,7 +59,7 @@ async function executeVisualCheck(
     [check.id],
   );
   const baseline = baselineResult.rows[0] ?? null;
-  const execution = await runVisualCheck(project.base_url, project.id, check, baseline);
+  const execution = await runVisualCheck(project.base_url, project.id, checkToRun, baseline);
   let baselineId: string | null = baseline?.id ?? null;
 
   if (execution.status === "baseline_created" && execution.baselinePath) {
@@ -156,6 +165,11 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
       if (project.rowCount === 0) {
         return reply.code(404).send({ error: "Project not found" });
       }
+      let resolvedPath = body.data.path;
+      if (resolvedPath === "/" && body.data.name.startsWith("/")) {
+        resolvedPath = body.data.name.trim();
+      }
+
       const result = await pool.query(
         `INSERT INTO visual_checks
            (project_id, name, path, viewport_width, viewport_height, threshold)
@@ -163,7 +177,7 @@ const visualRoutes: FastifyPluginAsync = async (fastify) => {
         [
           params.data.projectId,
           body.data.name,
-          body.data.path,
+          resolvedPath,
           body.data.viewport_width,
           body.data.viewport_height,
           body.data.threshold,

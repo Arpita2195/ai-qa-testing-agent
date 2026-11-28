@@ -4626,7 +4626,7 @@ function ApiEndpointsTab({ projectId }: { projectId: string }) {
 function VisualTab({ projectId }: { projectId: string }) {
   const { data, loading, error, reload } = useResource<VisualCheck[]>(`/projects/${projectId}/visual-checks`);
   const [name, setName] = useState("");
-  const [path, setPath] = useState("/");
+  const [path, setPath] = useState("");
   const [message, setMessage] = useState("");
   const [results, setResults] = useState<Array<Record<string, unknown>>>([]);
   const [busy, setBusy] = useState(false);
@@ -4636,11 +4636,18 @@ function VisualTab({ projectId }: { projectId: string }) {
     event.preventDefault();
     setBusy(true);
     try {
+      const resolvedPath =
+        path.trim() ||
+        (name.trim().startsWith("/")
+          ? name.trim()
+          : `/${name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-")}`);
+
       await api(`/projects/${projectId}/visual-checks`, {
         method: "POST",
-        body: JSON.stringify({ name, path: path.trim() || "/" }),
+        body: JSON.stringify({ name, path: resolvedPath }),
       });
       setName("");
+      setPath("");
       setMessage("Visual check created.");
       reload();
     } catch (reason) {
@@ -4710,8 +4717,8 @@ function VisualTab({ projectId }: { projectId: string }) {
 
   return <div className="tab-content">
     <form className="inline-form" onSubmit={createCheck}>
-      <input required placeholder="Page name (e.g. AI Chat)" value={name} onChange={(event) => setName(event.target.value)} />
-      <input placeholder="Optional route (default: find by page name)" value={path} onChange={(event) => setPath(event.target.value)} />
+      <input required placeholder="Page name (e.g. General Settings)" value={name} onChange={(event) => setName(event.target.value)} />
+      <input placeholder="Optional route (e.g. /general-settings)" value={path} onChange={(event) => setPath(event.target.value)} />
       <button disabled={busy || runningCheckId !== null}>Create check</button>
       <button type="button" className="secondary" disabled={busy || runningCheckId !== null || !data?.length} onClick={() => void runChecks()}>Run all checks</button>
     </form>
