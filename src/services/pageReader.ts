@@ -354,7 +354,8 @@ export async function readSite(
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
   });
   const startTime = Date.now();
-  const TOTAL_TIMEOUT_MS = 120000;
+  // Keep synchronous page reading within 25s so the full request (read + AI generation) finishes under the 60s reverse proxy limit
+  const TOTAL_TIMEOUT_MS = 25000;
 
   try {
     let baseUrl: string;
@@ -469,7 +470,7 @@ export async function readSite(
     const navLinks = await findNavigationLinks(page, origin);
 
     for (const linkUrl of navLinks) {
-      if (pages.length >= 8) break;
+      if (pages.length >= 3) break;
       if (Date.now() - startTime >= TOTAL_TIMEOUT_MS) break;
 
       const normalized = linkUrl.split("#")[0].split("?")[0];
