@@ -2088,6 +2088,7 @@ function Layout() {
 
 function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
   const [url, setUrl] = useState("");
+  const [projectName, setProjectName] = useState("");
   const [ownerConfirmed, setOwnerConfirmed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState("");
@@ -2130,7 +2131,11 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
   async function handleStart(e: FormEvent) {
     e.preventDefault();
     if (!ownerConfirmed) {
-      setError("This is a test environment I own or have permission to test must be confirmed.");
+      setError("Website ownership or testing authorization must be confirmed before testing.");
+      return;
+    }
+    if (!url.trim()) {
+      setError("Please enter a valid website URL.");
       return;
     }
     setError("");
@@ -2144,6 +2149,7 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
       const project = await api<Project>("/projects", {
         method: "POST",
         body: JSON.stringify({
+          name: projectName.trim() || undefined,
           base_url: url.trim(),
           owner_confirmed: true,
           declaration_text: `I confirm that I own ${url.trim()} or have explicit authorization from its owner to test it.`,
@@ -2160,6 +2166,42 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
       } else {
         await triggerDiscoveryAndGenerate(project.id);
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setProgress("");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCreateOnly(e: FormEvent) {
+    e.preventDefault();
+    if (!ownerConfirmed) {
+      setError("Website ownership or testing authorization must be confirmed before creating a project.");
+      return;
+    }
+    if (!url.trim()) {
+      setError("Please enter a valid website URL.");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    setProgress("Creating project…");
+    try {
+      await api<Project>("/projects", {
+        method: "POST",
+        body: JSON.stringify({
+          name: projectName.trim() || undefined,
+          base_url: url.trim(),
+          owner_confirmed: true,
+          declaration_text: `I confirm that I own ${url.trim()} or have explicit authorization from its owner to test it.`,
+        }),
+      });
+      setUrl("");
+      setProjectName("");
+      setOwnerConfirmed(false);
+      setProgress("Project created successfully and added to All Projects.");
+      onProjectCreated();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setProgress("");
@@ -2322,28 +2364,58 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
 
   return (
     <div className="test-app-box">
-      <h2>Test a new app</h2>
-      <div className="legal-callout">
-        <strong>Website Ownership & Authorization Notice</strong>
-        Automated testing executes simulated user interactions, crawls, and functional tests against the target domain.
-        You must confirm that you own this website or have explicit authorization from its owner before scanning.
-      </div>
-      <form onSubmit={handleStart} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
-          <input
-            style={{ flex: 1, minWidth: "280px" }}
-            required
-            type="url"
-            aria-label="App URL"
-            placeholder="https://shop.northstar.test"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            disabled={loading || accessSaving}
-          />
-          <button disabled={loading || accessSaving || !url.trim() || !ownerConfirmed}>
-            {loading ? "Starting…" : "Start"}
-          </button>
+      <div className="test-app-header">
+        <div>
+          <h2>Test a new app</h2>
+          <p className="muted" style={{ margin: "3px 0 0", fontSize: "13px" }}>
+            Register a website or web application to verify accessibility and generate automated tests.
+          </p>
         </div>
+      </div>
+
+      <div className="legal-callout">
+        <svg className="legal-callout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+        </svg>
+        <div className="legal-callout-text">
+          <strong>Website Ownership & Authorization Notice</strong>
+          <span>Automated testing executes simulated user interactions, crawls, and functional tests against the target domain. You must confirm that you own this website or have explicit authorization from its owner before scanning.</span>
+        </div>
+      </div>
+
+      <form onSubmit={handleStart} className="test-app-form">
+        <div className="test-app-input-row">
+          <div className="input-group" style={{ flex: "1 1 320px" }}>
+            <label htmlFor="test-app-url" className="input-label">
+              <strong>Target Web URL *</strong>
+            </label>
+            <input
+              id="test-app-url"
+              required
+              type="url"
+              aria-label="Target Web URL"
+              placeholder="https://shop.northstar.test"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              disabled={loading || accessSaving}
+            />
+          </div>
+          <div className="input-group" style={{ flex: "1 1 240px" }}>
+            <label htmlFor="test-app-name" className="input-label">
+              <strong>Project Name</strong> <span className="muted">(optional, defaults to domain)</span>
+            </label>
+            <input
+              id="test-app-name"
+              type="text"
+              aria-label="Project Name"
+              placeholder="e.g. Northstar Storefront"
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              disabled={loading || accessSaving}
+            />
+          </div>
+        </div>
+
         <label className="checkbox-label">
           <input
             type="checkbox"
@@ -2354,10 +2426,28 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
           />
           <span>I confirm that I own this website or have explicit authorization from its owner to test it.</span>
         </label>
+
+        <div className="test-app-actions">
+          <button
+            type="submit"
+            className="primary"
+            disabled={loading || accessSaving || !url.trim() || !ownerConfirmed}
+          >
+            {loading ? "Testing…" : "Start automated testing"}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={handleCreateOnly}
+            disabled={loading || accessSaving || !url.trim() || !ownerConfirmed}
+          >
+            Create project only
+          </button>
+        </div>
       </form>
 
-      {progress && <p className="notice" style={{ marginTop: "12px" }}>{progress}</p>}
-      {error && <p className="notice error" style={{ marginTop: "12px" }}>{error}</p>}
+      {progress && <p className="notice" style={{ marginTop: "14px" }}>{progress}</p>}
+      {error && <p className="notice error" style={{ marginTop: "14px" }}>{error}</p>}
 
       {detectedStatus === "login_required" && testCases.length === 0 && (
         <div
@@ -2537,42 +2627,8 @@ function TestNewAppBox({ onProjectCreated }: { onProjectCreated: () => void }) {
 function ProjectsPage() {
   const { user } = useAuth();
   const { data, loading, error, reload } = useResource<Project[]>("/projects");
-  const [name, setName] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [ownerConfirmed, setOwnerConfirmed] = useState(false);
-  const [formError, setFormError] = useState("");
-  const [saving, setSaving] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [deleteError, setDeleteError] = useState("");
-
-  async function createProject(event: FormEvent) {
-    event.preventDefault();
-    if (!ownerConfirmed) {
-      setFormError("Website ownership or testing authorization must be confirmed before creating a project.");
-      return;
-    }
-    setSaving(true);
-    setFormError("");
-    try {
-      await api<Project>("/projects", {
-        method: "POST",
-        body: JSON.stringify({
-          name: name.trim(),
-          base_url: baseUrl.trim(),
-          owner_confirmed: true,
-          declaration_text: `I confirm that I own ${baseUrl.trim()} or have explicit authorization from its owner to test it.`,
-        }),
-      });
-      setName("");
-      setBaseUrl("");
-      setOwnerConfirmed(false);
-      reload();
-    } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setSaving(false);
-    }
-  }
 
   async function deleteProject(project: Project) {
     if (!confirm(`Delete project "${project.name}"? This action cannot be undone.`)) {
@@ -2609,88 +2665,87 @@ function ProjectsPage() {
         </div>
       )}
 
-      <h2 style={{ marginTop: "32px" }}>All Projects</h2>
-      {canCreate && (
-        <form className="stack-form" style={{ maxWidth: "600px", margin: "16px 0" }} onSubmit={createProject}>
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            <input
-              required
-              aria-label="Project name"
-              placeholder="Project name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              style={{ flex: 1 }}
-            />
-            <input
-              required
-              type="url"
-              aria-label="Base URL"
-              placeholder="https://portal.northstar.test"
-              value={baseUrl}
-              onChange={(event) => setBaseUrl(event.target.value)}
-              style={{ flex: 1 }}
-            />
-          </div>
+      <div className="section-header-row" style={{ marginTop: "32px", marginBottom: "14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0, display: "flex", alignItems: "center", gap: "10px" }}>
+          <span>All Projects</span>
+          <span className="count-pill">{data?.length ?? 0}</span>
+        </h2>
+      </div>
 
-          <div className="legal-callout">
-            <strong>Website Ownership & Authorization Notice</strong>
-            Automated QA tests execute simulated user inputs, form submissions, and automated browser traffic.
-            You must declare that you own the target website or have authorization from the site owner.
-          </div>
-
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              required
-              checked={ownerConfirmed}
-              onChange={(e) => setOwnerConfirmed(e.target.checked)}
-            />
-            <span>I confirm that I own this website or have explicit authorization from its owner to test it.</span>
-          </label>
-
-          <button disabled={saving || !ownerConfirmed} style={{ alignSelf: "flex-start" }}>
-            {saving ? "Creating…" : "Create project"}
-          </button>
-        </form>
-      )}
-      {formError && <p className="error">{formError}</p>}
       {deleteError && <p className="error" role="alert">{deleteError}</p>}
       <State loading={loading} error={error}>
-        <div className="cards">
+        <div className="projects-grid">
           {(data ?? []).map((project) => {
             const canDelete =
               user?.role === "admin" || project.user_project_role === "qa_manager";
+            const isAuthSaved = project.has_session || project.has_credentials;
             return (
-              <div className="project-card-item" key={project.id}>
-                <Link className="card" to={`/projects/${project.id}`}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <strong>{project.name}</strong>
+              <div className="project-card" key={project.id}>
+                <div className="project-card-top">
+                  <div className="project-card-header">
+                    <Link className="project-title-link" to={`/projects/${project.id}`}>
+                      {project.name}
+                    </Link>
                     {project.owner_confirmed && (
-                      <span className="authorization-status">Authorized</span>
+                      <span className="auth-badge">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                        <span>Authorized</span>
+                      </span>
                     )}
                   </div>
-                  <span>{project.base_url}</span>
-                  <span style={{ fontSize: "0.8rem", color: project.has_credentials || project.has_session ? "#1c6b42" : "#80621b" }}>
-                    {project.has_session
-                      ? "Session saved"
-                      : project.has_credentials
-                        ? "Credentials saved"
-                        : project.access_status === "login_required"
-                          ? "Login required"
-                          : "Public"}
-                  </span>
-                </Link>
-                {canDelete && (
-                  <button
-                    type="button"
-                    className="project-delete-button"
-                    disabled={deletingProjectId === project.id}
-                    onClick={() => void deleteProject(project)}
-                    aria-label={`Delete project ${project.name}`}
-                  >
-                    {deletingProjectId === project.id ? "Deleting…" : "Delete project"}
-                  </button>
-                )}
+                  <div className="project-url-row" title={project.base_url}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="url-icon" aria-hidden="true">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <line x1="2" y1="12" x2="22" y2="12"></line>
+                      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                    </svg>
+                    <span className="project-url-text">{project.base_url}</span>
+                  </div>
+                  <div className="project-status-row">
+                    <span className={`status-pill ${
+                      isAuthSaved ? "status-success" :
+                      project.access_status === "login_required" ? "status-warning" : "status-neutral"
+                    }`}>
+                      <span className="status-dot" />
+                      <span>
+                        {project.has_session
+                          ? "Session saved"
+                          : project.has_credentials
+                            ? "Credentials saved"
+                            : project.access_status === "login_required"
+                              ? "Login required"
+                              : "Public"}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+                <div className="project-card-footer">
+                  <Link className="project-open-link" to={`/projects/${project.id}`}>
+                    <span>Open project</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                      <polyline points="12 5 19 12 12 19"></polyline>
+                    </svg>
+                  </Link>
+                  {canDelete && (
+                    <button
+                      type="button"
+                      className="project-delete-ghost"
+                      disabled={deletingProjectId === project.id}
+                      onClick={() => void deleteProject(project)}
+                      aria-label={`Delete project ${project.name}`}
+                      title="Delete project"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                      </svg>
+                      <span>{deletingProjectId === project.id ? "…" : "Delete"}</span>
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })}
