@@ -200,14 +200,15 @@ export function classifyRunStatus(statuses: string[]): WebResultStatus {
 }
 
 function isCredentialTest(steps: string[], credentials?: AppCredentials): boolean {
-  // If the test navigates to an internal application page (e.g. "goto /admin-email-templates"),
+  // If the test navigates to an internal application page (e.g. "goto /admin-email-templates" or "goto /hangfire-jobs"),
   // it is a feature test on that page, NOT a standalone credential test.
-  const firstGoto = steps.find((s) => s.startsWith("goto "));
-  if (firstGoto) {
-    const route = firstGoto.slice("goto ".length).trim();
-    if (!/\b(login|signin|sign-in|auth)\b/i.test(route) && route !== "/" && route !== "") {
-      return false;
-    }
+  const hasFeatureGoto = steps.some((s) => {
+    if (!s.startsWith("goto ")) return false;
+    const route = s.slice("goto ".length).trim();
+    return !/\b(login|signin|sign-in|auth)\b/i.test(route) && route !== "/" && route !== "";
+  });
+  if (hasFeatureGoto) {
+    return false;
   }
 
   const secrets = [
@@ -865,43 +866,46 @@ export async function runTestCase(
       await page.waitForLoadState("domcontentloaded");
     }
 
-    // Identify the target page navigation step (e.g. "goto /admin-email-templates")
-    const firstGotoIndex = steps.findIndex((s) => s.startsWith("goto "));
+    // Identify the target page navigation step (e.g. "goto /admin-email-templates" or "goto /hangfire-jobs").
+    // If the test has pre-login steps starting with "goto /login" or "goto /", the target page is the feature route goto.
+    let targetRouteGotoIndex = steps.findIndex((s) => {
+      if (!s.startsWith("goto ")) return false;
+      const target = s.slice(5).trim();
+      return !/^\/?(login|signin|sign-in|auth)\b/i.test(target) && target !== "" && target !== "/";
+    });
+    if (targetRouteGotoIndex === -1) {
+      targetRouteGotoIndex = steps.findIndex((s) => s.startsWith("goto "));
+    }
+
+    // Check once whether the browser session is already authenticated inside the application view
+    let isAlreadyAuthenticated = false;
+    if (targetRouteGotoIndex > 0 && !credentialTest) {
+      let onLoginPage = false;
+      try {
+        const currentPath = new URL(page.url()).pathname;
+        onLoginPage = /\b(login|signin|sign-in|auth)\b/i.test(currentPath);
+      } catch {}
+
+      const passwordCount = await page.locator('input[type="password"]').count().catch(() => 0);
+      const hasPasswordVisible =
+        passwordCount > 0 &&
+        (await page.locator('input[type="password"]').first().isVisible().catch(() => false));
+
+      if (!onLoginPage && !hasPasswordVisible) {
+        isAlreadyAuthenticated = true;
+      }
+    }
 
     for (const [stepIndex, step] of steps.entries()) {
       try {
-        const resolvedStep = resolveStepPlaceholders(step, activeCredentials);
-
-        // If the browser session is ALREADY authenticated (not on a login page and has no password input),
-        // and the current step is a leading pre-login step before the target "goto <route>",
-        // skip this redundant login step so execution proceeds directly to the target page.
-        if (firstGotoIndex > 0 && stepIndex < firstGotoIndex) {
-          const isLoginAction =
-            resolvedStep.includes("{{") ||
-            /fill\s+(?:#email|#username|input\[type=["']?email|input\[type=["']?password|input\[name=["']?email|input\[name=["']?password)/i.test(step) ||
-            /click\s+(?:button|input)\[type=["']?submit/i.test(step) ||
-            /click\s+(?:\.sign-in|#login|#signin)/i.test(step) ||
-            /expect\s+not\s+visible\s+.*password/i.test(step);
-
-          if (isLoginAction) {
-            let onLoginPage = false;
-            try {
-              const currentPath = new URL(page.url()).pathname;
-              onLoginPage = /\b(login|signin|sign-in|auth)\b/i.test(currentPath);
-            } catch {}
-
-            const passwordCount = await page.locator('input[type="password"]').count().catch(() => 0);
-            const hasPasswordVisible =
-              passwordCount > 0 &&
-              (await page.locator('input[type="password"]').first().isVisible().catch(() => false));
-
-            if (!onLoginPage && !hasPasswordVisible) {
-              // Session is already authenticated. Pre-login step is redundant; skip to target route.
-              continue;
-            }
-          }
+        // If the browser session is ALREADY authenticated inside the application (e.g. at /dashboard),
+        // any leading steps before "goto <targetRoute>" are redundant pre-login steps.
+        // Skip them so execution starts directly at the target page route!
+        if (isAlreadyAuthenticated && targetRouteGotoIndex > 0 && stepIndex < targetRouteGotoIndex) {
+          continue;
         }
 
+        const resolvedStep = resolveStepPlaceholders(step, activeCredentials);
         await executePageStep(page, baseUrl, resolvedStep);
       } catch (error) {
         evidence.errorMessage = redactSecrets(getErrorMessage(error), activeCredentials);

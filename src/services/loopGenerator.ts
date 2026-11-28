@@ -679,13 +679,12 @@ export async function runLoopGeneration(
             ? plannedScenarioMap.get(testCase.scenario_id)!
             : scenarioBatch.find((s) => s.status === "planned") || scenarioBatch[0];
 
-        // Prepare final steps with login prepended if needed
+        // Prepare final steps for the test case
+        // Feature tests start cleanly with target route navigation ("goto <pagePath>")
+        // while the test runner handles pre-authentication at the browser session level.
         let finalSteps: string[];
-        if (siteData.isLoggedIn && siteData.loginSteps.length > 0) {
-          const remainingSteps = testCase.steps.filter(
-            (step, index) => !(index === 0 && step.startsWith("goto ")),
-          );
-          finalSteps = [...siteData.loginSteps, `goto ${func.pagePath}`, ...remainingSteps];
+        if (!testCase.steps.some((s) => s.startsWith("goto "))) {
+          finalSteps = [`goto ${func.pagePath}`, ...testCase.steps];
         } else {
           finalSteps = testCase.steps;
         }
