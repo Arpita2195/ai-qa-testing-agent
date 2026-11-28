@@ -3146,7 +3146,25 @@ function TestCasesTab({ projectId }: { projectId: string }) {
       setMessage(formatGenerationMessage(result));
       reload();
     } catch (reason) {
-      setMessage(reason instanceof Error ? reason.message : String(reason));
+      const errText = reason instanceof Error ? reason.message : String(reason);
+      if (errText.includes("Generation already in progress")) {
+        setMessage("A test generation job is already actively running for this project. Checking for newly generated test cases…");
+        const pollInterval = setInterval(async () => {
+          try {
+            const cases = await api<TestCase[]>(`/projects/${projectId}/test-cases`);
+            if (cases && cases.length > 0) {
+              clearInterval(pollInterval);
+              setMessage(`Test generation complete: ${cases.length} test case(s) ready.`);
+              reload();
+            }
+          } catch {
+            // Ignore temporary polling errors
+          }
+        }, 4000);
+        setTimeout(() => clearInterval(pollInterval), 90000);
+      } else {
+        setMessage(errText);
+      }
     } finally {
       setGenerating(false);
     }
