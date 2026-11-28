@@ -1971,16 +1971,57 @@ function Layout() {
             onClick={() => setSidebarOpen(false)}
             aria-label="Close navigation"
           >
-            Close
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+            <span>Close</span>
           </button>
         </div>
         <div className="sidebar-group">
           <p className="sidebar-label">Workspace</p>
           <nav className="primary-nav" aria-label="Primary navigation">
-            <NavLink to="/projects" className={pathname === "/" ? "active" : undefined} onClick={closeSidebarOnMobile}>Projects</NavLink>
-            <NavLink to="/bug-reports" onClick={closeSidebarOnMobile}>Bug reports</NavLink>
-            <NavLink to="/monitoring" onClick={closeSidebarOnMobile}>Observability</NavLink>
-            {user?.role === "admin" && <NavLink to="/users" onClick={closeSidebarOnMobile}>User management</NavLink>}
+            <NavLink to="/projects" className={pathname === "/" ? "active" : undefined} onClick={closeSidebarOnMobile}>
+              <svg className="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+                <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+              </svg>
+              <span>Projects</span>
+            </NavLink>
+            <NavLink to="/bug-reports" onClick={closeSidebarOnMobile}>
+              <svg className="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect width="8" height="14" x="8" y="6" rx="4"></rect>
+                <path d="m19 7-3 2"></path>
+                <path d="m5 7 3 2"></path>
+                <path d="m19 19-3-2"></path>
+                <path d="m5 19 3-2"></path>
+                <path d="M20 13h-4"></path>
+                <path d="M4 13h4"></path>
+                <path d="m10 4 1 2"></path>
+                <path d="m14 4-1 2"></path>
+              </svg>
+              <span>Bug reports</span>
+            </NavLink>
+            <NavLink to="/monitoring" onClick={closeSidebarOnMobile}>
+              <svg className="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 3v18h18"></path>
+                <path d="m19 9-5 5-4-4-3 3"></path>
+              </svg>
+              <span>Observability</span>
+            </NavLink>
+            {user?.role === "admin" && (
+              <NavLink to="/users" onClick={closeSidebarOnMobile}>
+                <svg className="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="9" cy="7" r="4"></circle>
+                  <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                </svg>
+                <span>User management</span>
+              </NavLink>
+            )}
           </nav>
         </div>
         <div className="sidebar-footer">
@@ -2002,11 +2043,11 @@ function Layout() {
               aria-label={sidebarOpen ? "Collapse navigation" : "Expand navigation"}
               onClick={() => setSidebarOpen((open) => !open)}
             >
-              <span className="menu-glyph" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-              </span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
+              </svg>
             </button>
             <div className="workspace-context">
               <span>Workspace</span>
