@@ -26,19 +26,22 @@ export function optimizePageElements(
   const groupCounts = new Map<string, number>();
 
   for (const el of elements) {
-    // 1. Always retain interactive form controls and inputs
+    // 1. Always retain interactive form controls, action buttons, inputs, tabs, and tables
     const isInteractive =
       el.tag === "input" ||
       el.tag === "button" ||
       el.tag === "select" ||
       el.tag === "textarea" ||
       el.tag === "a" ||
+      el.tag === "th" ||
       el.type === "submit" ||
       el.type === "button" ||
       el.type === "password" ||
       el.type === "email" ||
       Boolean(el.name) ||
-      Boolean(el.placeholder);
+      Boolean(el.placeholder) ||
+      Boolean(el.options && el.options.length > 0) ||
+      Boolean(el.selector && (el.selector.includes("[role=") || el.selector.includes(".p-")));
 
     // 2. Retain headings and explicit testable identifiers
     const isHeading =

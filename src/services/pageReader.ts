@@ -111,7 +111,13 @@ export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {
 
     function selectorFor(element) {
       const tagName = element.tagName.toLowerCase();
-      const isUnique = (selector) => document.querySelectorAll(selector).length === 1;
+      const isUnique = (selector) => {
+        try {
+          return document.querySelectorAll(selector).length === 1;
+        } catch {
+          return false;
+        }
+      };
 
       if (element instanceof HTMLElement && element.id) {
         const idSelector = "#" + CSS.escape(element.id);
@@ -120,7 +126,7 @@ export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {
         }
       }
 
-      for (const attribute of ["data-testid", "data-test", "data-qa", "name", "aria-label", "placeholder"]) {
+      for (const attribute of ["data-testid", "data-test", "data-qa", "name", "aria-label", "placeholder", "role"]) {
         const value = element.getAttribute(attribute);
         if (!value) continue;
         const candidate = tagName + "[" + attribute + "=" + JSON.stringify(value) + "]";
@@ -138,6 +144,16 @@ export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {
       ) {
         const candidate = tagName + "[type=" + JSON.stringify(element.type) + "]";
         if (isUnique(candidate)) return candidate;
+      }
+
+      // Check unique class name if distinctive (skip generic Angular/PrimeNG wrappers)
+      if (element.classList && element.classList.length > 0) {
+        for (const cls of Array.from(element.classList)) {
+          if (!cls.startsWith("ng-") && !cls.startsWith("p-element") && cls.length > 2) {
+            const candidate = tagName + "." + CSS.escape(cls);
+            if (isUnique(candidate)) return candidate;
+          }
+        }
       }
 
       const parts = [];
@@ -164,27 +180,52 @@ export async function extractScrapedPage(page: Page): Promise<ScrapedPage> {
       .map((h) => h.textContent?.trim() ?? "")
       .filter(Boolean);
 
-    const elements = Array.from(
-      document.querySelectorAll("a, button, input, form, select, textarea, table"),
-    )
-      .filter(visible)
-      .slice(0, 40)
-      .map((element) => {
+    function isLayoutNav(el) {
+      return Boolean(
+        el.closest("aside, nav, header, footer, .sidebar, .navbar, .menu, app-sidebar, app-header")
+      );
+    }
+
+    const rawElements = Array.from(
+      document.querySelectorAll("a, button, input, form, select, textarea, table, [role='button'], [role='tab'], [role='combobox'], [role='listbox'], [role='checkbox'], [role='switch'], th"),
+    ).filter(visible);
+
+    // Prioritize main page content (action buttons, search inputs, form fields, tabs, tables)
+    // over repetitive layout navigation (sidebar links, navbar menus)
+    const contentElements = rawElements.filter((el) => !isLayoutNav(el));
+    const layoutElements = rawElements.filter((el) => isLayoutNav(el));
+    const prioritizedElements = [...contentElements.slice(0, 70), ...layoutElements.slice(0, 20)];
+
+    const elements = prioritizedElements.map((element) => {
         const tag = element.tagName.toLowerCase();
-        const text =
-          element.textContent?.trim() ||
-          element.getAttribute("placeholder") ||
-          element.getAttribute("name") ||
-          "";
+        let text = "";
+        if (tag === "th") {
+          text = element.textContent?.trim() || "";
+        } else if (tag === "table") {
+          const ths = Array.from(element.querySelectorAll("th, [role='columnheader']"))
+            .map((th) => th.textContent?.trim())
+            .filter(Boolean);
+          text = ths.length > 0 ? "Columns: " + ths.join(", ") : (element.textContent?.trim() || "").slice(0, 100);
+        } else {
+          text =
+            element.getAttribute("aria-label")?.trim() ||
+            element.getAttribute("title")?.trim() ||
+            element.textContent?.trim() ||
+            element.getAttribute("placeholder")?.trim() ||
+            element.getAttribute("name")?.trim() ||
+            "";
+        }
+
         const options = element instanceof HTMLSelectElement
           ? Array.from(element.options).map((option) => ({
               text: option.textContent?.trim() ?? "",
               value: option.value,
             }))
           : undefined;
+
         return {
           tag,
-          text,
+          text: text.slice(0, 120),
           selector: selectorFor(element),
           type: element.getAttribute("type") ?? undefined,
           href: element instanceof HTMLAnchorElement ? element.href : undefined,
@@ -470,7 +511,7 @@ export async function readSite(
     const navLinks = await findNavigationLinks(page, origin);
 
     for (const linkUrl of navLinks) {
-      if (pages.length >= 3) break;
+      if (pages.length >= 5) break;
       if (Date.now() - startTime >= TOTAL_TIMEOUT_MS) break;
 
       const normalized = linkUrl.split("#")[0].split("?")[0];
