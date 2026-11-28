@@ -3080,11 +3080,12 @@ function TestCasesTab({ projectId }: { projectId: string }) {
         <h2>Test cases</h2>
         <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
           <input
-            placeholder="Page path (optional, e.g. /inventory)"
+            placeholder="Page path (e.g. /inventory or leave empty)"
             value={pagePath}
             onChange={(event) => setPagePath(event.target.value)}
             disabled={generating || runningAll}
             aria-label="Page path"
+            title="Enter a route path like /inventory, or leave empty to test the whole application"
           />
           <label style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.85rem", cursor: "pointer", userSelect: "none" }}>
             <input

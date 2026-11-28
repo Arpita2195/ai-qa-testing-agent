@@ -419,7 +419,11 @@ export async function readSite(
     page.setDefaultTimeout(30000);
 
     if (options.path && options.path.trim()) {
-      const targetUrl = new URL(options.path, baseUrl).toString();
+      let requestedPath = options.path.trim();
+      if (!requestedPath.startsWith("/") && !requestedPath.startsWith("http://") && !requestedPath.startsWith("https://")) {
+        requestedPath = "/" + requestedPath;
+      }
+      const targetUrl = new URL(requestedPath, baseUrl).toString();
       await assertTargetUrlAllowed(targetUrl);
       if (page.url() !== targetUrl) {
         const resp = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -430,7 +434,12 @@ export async function readSite(
       }
       const scraped = await extractScrapedPage(page);
       if (isErrorPageContent(scraped.title, scraped.headings, scraped.text)) {
-        throw new Error(`Target page "${targetUrl}" loaded an error page: "${scraped.title}"`);
+        const errorDetail =
+          scraped.headings.find((h) => /not found|404|error|denied|forbidden|oops/i.test(h)) ||
+          (scraped.path.includes("not-found") ? "404 Page Not Found" : scraped.title);
+        throw new Error(
+          `Target page "${targetUrl}" does not exist on this application (loaded "${errorDetail}"). Please provide a valid page route (e.g. /inventory) or leave the field blank to generate tests for the application.`,
+        );
       }
       return {
         baseUrl,
