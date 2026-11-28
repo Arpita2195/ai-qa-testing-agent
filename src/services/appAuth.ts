@@ -28,6 +28,66 @@ async function getStableSelector(locator: Locator): Promise<string> {
   });
 }
 
+async function findSubmitButton(page: Page): Promise<Locator> {
+  const explicitTextSelector = [
+    'button:has-text("Sign in")',
+    'button:has-text("Sign In")',
+    'button:has-text("Log in")',
+    'button:has-text("Log In")',
+    'button:has-text("Login")',
+    'button:has-text("Submit")',
+    'button:has-text("Continue")',
+    'button:has-text("Next")',
+    'input[type="submit"][value*="sign" i]',
+    'input[type="submit"][value*="log" i]',
+    'input[type="submit"][value*="submit" i]',
+    'button[id*="login" i]',
+    'button[id*="signin" i]',
+    'button[id*="submit" i]',
+    'button[class*="login" i]',
+    'button[class*="signin" i]',
+    'button[class*="sign-in" i]',
+  ].join(", ");
+
+  const explicitBtn = page.locator(explicitTextSelector).first();
+  if ((await explicitBtn.count()) > 0 && (await explicitBtn.isVisible())) {
+    return explicitBtn;
+  }
+
+  const formSubmitCandidates = page.locator(
+    'form button[type="submit"], button[type="submit"], form button, input[type="submit"]',
+  );
+  const count = await formSubmitCandidates.count();
+  for (let i = 0; i < count; i++) {
+    const btn = formSubmitCandidates.nth(i);
+    if (!(await btn.isVisible())) continue;
+
+    const text = (await btn.innerText().catch(() => ""))?.trim() || "";
+    const className = (await btn.getAttribute("class").catch(() => "")) || "";
+    const ariaLabel = (await btn.getAttribute("aria-label").catch(() => "")) || "";
+
+    if (className.includes("palette-btn") || className.includes("p-button-icon-only")) {
+      continue;
+    }
+    if (/theme|mode|palette|language|toggle/i.test(`${className} ${ariaLabel}`)) {
+      continue;
+    }
+
+    if (/sign|log|submit|continue|next|enter/i.test(`${text} ${ariaLabel}`) || text.length > 0) {
+      return btn;
+    }
+  }
+
+  for (let i = 0; i < count; i++) {
+    const btn = formSubmitCandidates.nth(i);
+    if (await btn.isVisible()) {
+      return btn;
+    }
+  }
+
+  return page.locator('button[type="submit"], input[type="submit"], form button, button').first();
+}
+
 export interface AuthenticatedBrowserSetup {
   context: BrowserContext;
   page: Page;
@@ -98,7 +158,7 @@ export async function performGenericLogin(
     steps.push(`fill ${usernameSelector} | ${userPlaceholder}`);
 
     // Click Next/Continue/Submit
-    const nextBtn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Next"), button:has-text("Continue"), button').first();
+    const nextBtn = await findSubmitButton(page);
     const nextSelector = await getStableSelector(nextBtn);
 
     await nextBtn.click();
@@ -120,7 +180,7 @@ export async function performGenericLogin(
   steps.push(`fill ${passwordSelector} | ${passPlaceholder}`);
 
   // Find submit button
-  const submitBtn = page.locator('button[type="submit"], input[type="submit"], form button, button').first();
+  const submitBtn = await findSubmitButton(page);
   const submitSelector = await getStableSelector(submitBtn);
 
   await submitBtn.click();
@@ -137,6 +197,24 @@ export async function performGenericLogin(
         "This login needs manual steps (CAPTCHA, MFA or SSO). Use 'Log in manually' on the project page.",
       );
     }
+
+    // Check for visible error messages on the login page (e.g. invalid credentials)
+    const loginError = await page.evaluate(() => {
+      const errorEls = Array.from(
+        document.querySelectorAll(
+          ".error, .alert, .invalid-feedback, .p-message, .p-inline-message, [role='alert'], .text-danger, .p-error, .toast-message",
+        ),
+      ).filter((el) => {
+        const style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden" && (el.textContent ?? "").trim().length > 0;
+      });
+      return errorEls.map((e) => e.textContent?.trim()).filter(Boolean)[0] || null;
+    }).catch(() => null);
+
+    if (loginError) {
+      throw new Error(`Login failed (${loginError}). Please check your username and password.`);
+    }
+
     throw new Error("Login failed: password field did not hide after submission.");
   }
 
