@@ -2855,6 +2855,26 @@ function ProjectAccessBar({ project, onUpdate }: { project: Project; onUpdate: (
 const tabs = ["Test Cases", "Requirements", "Automations", "API Endpoints", "Mobile Testing", "Suites", "Schedules", "Runs", "Reports", "Visual", "Jobs & Monitoring", "Team", "Settings"] as const;
 type ProjectTab = (typeof tabs)[number];
 
+function BackButton({ to, label }: { to: string; label: string }) {
+  return (
+    <Link to={to} className="back-link">
+      <svg
+        className="back-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <line x1="19" y1="12" x2="5" y2="12"></line>
+        <polyline points="12 19 5 12 12 5"></polyline>
+      </svg>
+      <span>{label}</span>
+    </Link>
+  );
+}
+
 function ProjectPage() {
   const { id = "" } = useParams();
   const { data: project, loading, error, reload } = useResource<Project>(`/projects/${id}`);
@@ -2864,9 +2884,7 @@ function ProjectPage() {
 
   return (
     <section>
-      <Link to="/projects" className="back-link">
-        ← Projects
-      </Link>
+      <BackButton to="/projects" label="Back to Projects" />
       <State loading={loading} error={error}>
         {project && (
           <>
@@ -4877,9 +4895,10 @@ function SuiteDetailPage() {
 
   const choices = kind === "test" ? testCases : endpoints;
   return <section>
-    <Link to={suite?.project_id ? `/projects/${suite.project_id}?tab=suites` : "/projects"} className="back-link">
-      ← {suite?.project_id ? "Project suites" : "Projects"}
-    </Link><h1>Suite: {suite?.name ?? ""}</h1>
+    <BackButton
+      to={suite?.project_id ? `/projects/${suite.project_id}?tab=suites` : "/projects"}
+      label={`Back to ${suite?.project_id ? "Project suites" : "Projects"}`}
+    /><h1>Suite: {suite?.name ?? ""}</h1>
     <State loading={loading} error={error}>
       <form className="inline-form" onSubmit={addMember}>
         <select value={kind} onChange={(event) => { setKind(event.target.value as "test" | "api"); setSelection(""); }}>
@@ -5925,9 +5944,10 @@ function RunDetailPage() {
 
   return (
     <section>
-      <Link to={projectId ? `/projects/${projectId}?tab=runs` : "/projects"} className="back-link">
-        ← {projectId ? "Project runs" : "Projects"}
-      </Link>
+      <BackButton
+        to={projectId ? `/projects/${projectId}?tab=runs` : "/projects"}
+        label={`Back to ${projectId ? "Project runs" : "Projects"}`}
+      />
       <h1>Run details</h1>
       <State loading={loading} error={error}>
         <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap", margin: "8px 0 16px" }}>
