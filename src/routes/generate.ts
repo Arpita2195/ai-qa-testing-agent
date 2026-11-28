@@ -195,11 +195,18 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
               };
             }
 
+            const emptyDetail =
+              loopResult.totalFunctionalities === 0
+                ? (body.data.path
+                    ? `No testable functionalities or interactive elements were found on "${body.data.path}". Check that this page path exists (e.g. not a 404 page) and contains interactive buttons, forms, or content.`
+                    : "No testable interactive functionalities or elements were detected on this site.")
+                : `Loop generation produced no new test cases: ${loopResult.skippedInvalid} invalid, ${loopResult.skippedDuplicates} duplicate`;
+
             return {
               status: 422,
               body: {
                 error: "No test cases created",
-                message: `Loop generation produced no new test cases: ${loopResult.skippedInvalid} invalid, ${loopResult.skippedDuplicates} duplicate`,
+                message: emptyDetail,
                 created: 0,
                 skipped_invalid: loopResult.skippedInvalid,
                 skipped_duplicate: loopResult.skippedDuplicates,
@@ -304,11 +311,18 @@ const generateRoutes: FastifyPluginAsync = async (fastify) => {
         }
 
         if (createdCases.length === 0) {
+          const emptyDetail =
+            testCases.length === 0
+              ? (body.data.path
+                  ? `No testable functionalities or interactive elements were found on "${body.data.path}". Check that this page path exists (e.g. not a 404 page) and contains interactive buttons, forms, or content.`
+                  : "No testable interactive functionalities or elements were detected on this site.")
+              : `Generation produced no new test cases: ${skipped_invalid} invalid, ${skipped_duplicate} duplicate`;
+
           return {
             status: 422,
             body: {
               error: "No test cases created",
-              message: `Generation produced no new test cases: ${skipped_invalid} invalid, ${skipped_duplicate} duplicate`,
+              message: emptyDetail,
               created: 0,
               skipped_invalid,
               skipped_duplicate,
